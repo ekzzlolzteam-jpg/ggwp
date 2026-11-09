@@ -1,0 +1,7 @@
+requests>=2.31
+beautifulsoup4>=4.12
+# SOCKS5-прокси (proxy_url вида socks5://...)
+PySocks>=1.7
+# OCR скриншотов (нужен ещё сам Tesseract-OCR с немецким языком)
+pytesseract>=0.3.10
+Pillow>=10.0

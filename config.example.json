@@ -1,0 +1,32 @@
+{
+  "_comment": "Скопируй этот файл в config.json и заполни. config.json в git не попадает.",
+
+  "telegram_token": "ВСТАВЬ_ТОКЕН_ОТ_BOTFATHER",
+  "allowed_chat_ids": ["123456789"],
+  "proxy_url": "",
+
+  "requests_per_second": 8,
+  "workers": 6,
+  "request_timeout": 15,
+  "max_retries": 4,
+  "block_threshold": 20,
+  "block_pause_minutes": 5,
+
+  "users_per_day": 25000,
+  "locate_max_requests": 600,
+  "boundary_precision": 30,
+  "range_margin": 0,
+  "max_scan_ids": 400000,
+  "seed_anchors": [[46211501, "24.03.2017"], [48075804, "13.06.2017"]],
+
+  "chunk_size": 200,
+  "name_fuzzy_threshold": 0.85,
+  "stop_on_exact_match": true,
+  "auto_watch_on_match": true,
+
+  "monitor_minutes_min": 10,
+  "monitor_minutes_max": 30,
+
+  "tesseract_cmd": "",
+  "data_dir": "data"
+}

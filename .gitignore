@@ -1,0 +1,13 @@
+# секреты и рабочие данные
+config.json
+data/
+known_accounts.txt
+*.log
+search_progress*.json
+state_kleinanzeigen.json
+bot_state.json
+
+__pycache__/
+*.pyc
+.venv/
+venv/
