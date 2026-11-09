@@ -266,3 +266,106 @@ class TestMonitor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# =====================================================================
+# Реальные страницы и скриншоты (tests/samples)
+# =====================================================================
+SAMPLES = Path(__file__).resolve().parent / "samples"
+
+REAL_PAGES = {
+    # user_id: (имя, дата, плашки, подписчики)
+    64785484: ("Sally & Patrick", date(2019, 6, 16),
+               {"satisfaction": "TOP Zufriedenheit", "friendliness": "Besonders freundlich",
+                "reliability": "Besonders zuverlässig"}, 6),
+    43061549: ("Alex", date(2016, 10, 25),
+               {"satisfaction": "TOP Zufriedenheit", "friendliness": "Freundlich", "reliability": "Zuverlässig"}, None),
+    43538220: ("Christian", date(2016, 11, 16),
+               {"satisfaction": "TOP Zufriedenheit", "friendliness": "Freundlich",
+                "reliability": "Sehr zuverlässig"}, 7),
+    53898451: ("Linda Kglhd", date(2018, 3, 3),
+               {"satisfaction": "TOP Zufriedenheit", "friendliness": "Sehr freundlich",
+                "reliability": "Sehr zuverlässig"}, None),
+    26402834: ("IBV Verwaltung", date(2014, 12, 1), {}, 1151),
+    164857427: ("Noah", date(2026, 7, 23), {}, None),
+}
+
+# сырой вывод Tesseract 5 (deu+eng) по присланным скриншотам — чтобы тест работал и без Tesseract
+OCR_RAW = {
+    "screen_willi.png": "Willi\n\n0 Anzeigen online f=] Verkaufsübersicht >\nDeine Einnahmen über unser "
+                        "Bezahlsystem\n\nA Privater Nutzer N Aktiv seit 01.11.2024 ©",
+    "screen_arne.png": "Arne Schwarzmann\nAS 2 Anzeigen online / 138 gesamt Verkaufsübersicht\n\nDeine Einnahmen "
+                       "über unser Bezahlsystem\n© TOP Zufriedenheit db Zuverlässig\n\n[FE] Zum Immobilien-Profil |NEU\n"
+                       "= Prasentiere dich optimal für dein neues Zuhause\n\nA Privater Nutzer N Aktiv seit 05.03.2016 "
+                       "[0) 7 6 Folge ich, 4 Follower",
+    "screen_privat.png": "Privat\n\n39 Anzeigen online / 231 gesamt f=] Verkaufsubersicht >\nDeine Einnahmen über "
+                         "unser Bezahlsystem\n\n@ TOP Zufriedenheit ‚& Freundlich\n\n& Sehr zuverlässig\n\nA Privater "
+                         "Nutzer N Aktiv seit 17.08.2010 © Antwortet in der Regel innerhalb von 3 Stunden % 1 Folge "
+                         "ich, 5 Follower",
+}
+OCR_EXPECTED = {
+    "screen_willi.png": ("Willi", date(2024, 11, 1), {}, None, 0),
+    "screen_arne.png": ("Arne Schwarzmann", date(2016, 3, 5),
+                        {"satisfaction": "TOP Zufriedenheit", "reliability": "Zuverlässig"}, 4, 2),
+    "screen_privat.png": ("Privat", date(2010, 8, 17),
+                          {"satisfaction": "TOP Zufriedenheit", "friendliness": "Freundlich",
+                           "reliability": "Sehr zuverlässig"}, 5, 39),
+}
+
+
+class TestRealPages(unittest.TestCase):
+    def test_profiles(self):
+        for uid, (name, d, badges, followers) in REAL_PAGES.items():
+            with self.subTest(uid=uid):
+                p = kb.parse_profile_html((SAMPLES / f"profile_{uid}.html").read_text(encoding="utf-8"), uid)
+                self.assertEqual((p.name, p.aktiv_seit, p.badges, p.followers, p.page_user_id),
+                                 (name, d, badges, followers, uid))
+                self.assertTrue(p.listings, "объявления должны находиться")
+                for ad_id, ad in p.listings.items():
+                    self.assertTrue(ad["title"] and ad["url"].startswith("https://www.kleinanzeigen.de/s-anzeige/"))
+                    self.assertIn(ad_id, ad["url"])
+                self.assertTrue(kb.looks_like_profile(p and (SAMPLES / f"profile_{uid}.html").read_text(encoding="utf-8")))
+
+    def test_level_fallback_when_label_missing(self):
+        html = ('<div class="profile-userbadges"><button data-badge-name="friendliness" data-badge-level="1"></button>'
+                '<button data-badge-name="reliability" data-badge-level="2"></button></div>Aktiv seit 01.01.2020')
+        self.assertEqual(kb.parse_profile_html(html, 1).badges,
+                         {"friendliness": "Sehr freundlich", "reliability": "Besonders zuverlässig"})
+
+    def test_target_from_screenshot_matches_page(self):
+        """Скрин → цель → сравнение с HTML той же «формы» даёт точное совпадение."""
+        page = kb.parse_profile_html((SAMPLES / "profile_43538220.html").read_text(encoding="utf-8"), 43538220)
+        target = kb.parse_target_text("Christian\n16.11.2016\nTOP, Freundlich, Sehr zuverlässig")
+        self.assertEqual(kb.match_profile(target, page).level, "exact")
+        wrong = kb.parse_target_text("Christian\n16.11.2016\nTOP, Sehr freundlich")
+        self.assertEqual(kb.match_profile(wrong, page).level, "conflict")
+
+    def test_anchor_file_from_repo(self):
+        store = kb.AnchorStore(Path(tempfile.mkdtemp()) / "x.txt", extra_files=kb.LEGACY_ANCHOR_FILES)
+        items = store.items()
+        self.assertGreaterEqual(len(items), 160)
+        dates = [d for _, d in items]
+        self.assertEqual(dates, sorted(dates), "в known_accounts ID и даты должны расти вместе")
+
+
+class TestRealOCR(unittest.TestCase):
+    def test_recorded_ocr_text(self):
+        for fname, expected in OCR_EXPECTED.items():
+            with self.subTest(fname=fname):
+                self.assertEqual(kb.parse_ocr_text(OCR_RAW[fname]), expected)
+
+    def test_initials_never_become_name(self):
+        self.assertEqual(kb.parse_ocr_text("AS\nArne Schwarzmann\nAS\n2 Anzeigen online\nAktiv seit 05.03.2016")[0],
+                         "Arne Schwarzmann")
+        self.assertEqual(kb.parse_ocr_text("W\nWilli\n0 Anzeigen online\nAktiv seit 01.11.2024")[0], "Willi")
+
+    def test_real_tesseract(self):
+        try:
+            import pytesseract
+            pytesseract.get_tesseract_version()
+        except Exception:
+            self.skipTest("Tesseract не установлен")
+        for fname, expected in OCR_EXPECTED.items():
+            with self.subTest(fname=fname):
+                text = kb.ocr_image((SAMPLES / fname).read_bytes())
+                self.assertEqual(kb.parse_ocr_text(text)[:3], expected[:3])

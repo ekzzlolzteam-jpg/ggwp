@@ -211,6 +211,7 @@ class Profile:
     total_ads: Optional[int] = None
     followers: Optional[int] = None
     listings: dict = field(default_factory=dict)  # ad_id -> {"title","url","price"}
+    page_user_id: Optional[int] = None             # userId, который реально отдала страница
 
     @property
     def url(self) -> str:
@@ -291,6 +292,34 @@ def extract_listings(soup: BeautifulSoup) -> dict[str, dict]:
     return ads
 
 
+BADGE_ATTR_CATEGORY = {"rating": "satisfaction", "friendliness": "friendliness", "reliability": "reliability"}
+# data-badge-level на сайте: friendliness/reliability 0=обычная, 1=Sehr, 2=Besonders; rating 2=TOP
+BADGE_LEVEL_KEY = {"satisfaction": {2: "top", 1: "ok", 0: "naja"},
+                   "friendliness": {2: "besonders", 1: "sehr", 0: ""},
+                   "reliability": {2: "besonders", 1: "sehr", 0: ""}}
+
+
+def extract_badges(soup: BeautifulSoup) -> Optional[dict]:
+    """Плашки из разметки <button class="userbadge" data-badge-name=... data-badge-level=...>.
+    None — если таких элементов нет (тогда ищем по тексту)."""
+    elements = soup.select("[data-badge-name]")
+    if not elements:
+        return None
+    res: dict[str, str] = {}
+    for el in elements:
+        cat = BADGE_ATTR_CATEGORY.get(str(el.get("data-badge-name", "")).lower())
+        if not cat:
+            continue
+        label = detect_badges(el.get_text(" ", strip=True)).get(cat)
+        if not label:
+            level = str(el.get("data-badge-level", ""))
+            key = BADGE_LEVEL_KEY[cat].get(int(level)) if level.isdigit() else None
+            label = BADGE_LABELS[cat][key] if key is not None else None
+        if label:
+            res[cat] = label
+    return res
+
+
 def _int_after(pattern: str, text: str) -> Optional[int]:
     m = re.search(pattern, text, re.I)
     return int(m.group(1)) if m else None
@@ -304,7 +333,13 @@ def parse_profile_html(raw_html: str, user_id: int) -> Profile:
     prof.aktiv_seit = parse_date(m.group(1)) if m else None
     prof.name = extract_name(soup, raw_html)
     region = _profile_region_text(soup) or ""
-    prof.badges = detect_badges(region) if region else detect_badges(text)
+    structured = extract_badges(soup)
+    if structured is not None:
+        prof.badges = structured
+    else:
+        prof.badges = detect_badges(region) if region else detect_badges(text)
+    m = re.search(r'name="userId"\s+value="(\d+)"', raw_html) or re.search(r'data-followed-user="(\d+)"', raw_html)
+    prof.page_user_id = int(m.group(1)) if m else None
     src = region or text
     prof.online_ads = _int_after(r"(\d+)\s+Anzeigen?\s+online", src)
     prof.total_ads = _int_after(r"(\d+)\s+gesamt", src)
@@ -430,6 +465,8 @@ class Fetcher:
                     body = resp.text
                     if looks_like_profile(body):
                         prof = parse_profile_html(body, user_id)
+                        if prof.page_user_id not in (None, user_id):
+                            prof.name = prof.aktiv_seit = None   # редирект на чужой профиль
                         if prof.aktiv_seit or prof.name:
                             self._on_success()
                             with self._lock:
@@ -466,8 +503,12 @@ class Fetcher:
 # =====================================================================
 # БАЗА ЯКОРЕЙ (user_id -> дата регистрации), сама пополняется
 # =====================================================================
+LEGACY_ANCHOR_FILES = (BASE_DIR / "known_accounts", BASE_DIR / "known_accounts.txt")
+
+
 class AnchorStore:
-    def __init__(self, path: Path, seeds: Iterable = ()):
+    def __init__(self, path: Path, seeds: Iterable = (), extra_files: Iterable[Path] = ()):
+        """path — куда дописываются новые пары; extra_files — только чтение (база из репозитория)."""
         self.path = path
         self._lock = threading.Lock()
         self._data: dict[int, date] = {}
@@ -476,7 +517,7 @@ class AnchorStore:
             pd = parse_date(str(d))
             if pd:
                 self._data[int(uid)] = pd
-        for p in (path, BASE_DIR / "known_accounts.txt"):  # совместимость со старым Osnova.py
+        for p in (*extra_files, path):
             if p.exists():
                 for line in p.read_text(encoding="utf-8").splitlines():
                     if ";" in line:
@@ -969,8 +1010,28 @@ def parse_target_text(text: str) -> Optional[Target]:
 
 
 IGNORE_NAME_WORDS = ("privater nutzer", "gewerblicher", "aktiv seit", "anzeigen", "gesamt", "follower",
-                     "folge", "antwortet", "verkaufsübersicht", "sicher bezahlen", "kleinanzeigen",
-                     "zufriedenheit", "freundlich", "zuverl", "profil", "bestandsliste", "nachricht")
+                     "folge", "antwortet", "verkaufs", "sicher bezahlen", "kleinanzeigen", "einnahmen",
+                     "bezahlsystem", "immobilien", "zufriedenheit", "freundlich", "zuverl", "profil",
+                     "bestandsliste", "nachricht", "präsentiere", "prasentiere")
+BADGE_WORDS = {"top", "ok", "naja", "zufriedenheit", "besonders", "sehr", "freundlich", "zuverlassig"}
+INITIALS_RE = re.compile(r"^[A-ZÄÖÜ]{1,3}$")
+
+
+def _name_candidate(raw: str) -> Optional[str]:
+    line = re.sub(r"[©®™>|«»\[\]{}]", " ", raw)
+    line = re.sub(r"\s+", " ", line).strip(" -_.,:;=")
+    line = re.sub(r"^[A-ZÄÖÜ]{1,3}\s+(?=[A-ZÄÖÜ][a-zäöüß])", "", line)   # «AS Arne …» — инициалы аватарки
+    low = line.lower()
+    if len(line) < 2 or len(line) > 40 or INITIALS_RE.match(line):
+        return None
+    if any(w in low for w in IGNORE_NAME_WORDS) or DATE_RE.search(line):
+        return None
+    if not re.search(r"[A-Za-zÄÖÜäöüß]", line):
+        return None
+    words = re.findall(r"[^\W\d_]+", _badge_fold(line))
+    if words and all(w in BADGE_WORDS for w in words):
+        return None   # «Besonders», «TOP», «Sehr» — обрывки плашек
+    return line
 
 
 def parse_ocr_text(text: str) -> tuple[Optional[str], Optional[date], dict, Optional[int], Optional[int]]:
@@ -979,17 +1040,21 @@ def parse_ocr_text(text: str) -> tuple[Optional[str], Optional[date], dict, Opti
     badges = detect_badges(text)
     followers = _int_after(r"(\d+)\s+Follower", text)
     online = _int_after(r"(\d+)\s+Anzeigen?\s+online", text)
+    lines = text.splitlines()
+    # имя — последняя осмысленная строка перед «N Anzeigen online» (так на всех скринах профиля)
+    idx = next((i for i, ln in enumerate(lines) if re.search(r"Anzeigen?\s+online", ln, re.I)), None)
     name = None
-    for raw in text.splitlines():
-        line = re.sub(r"[©®™>|«»]", " ", raw)
-        line = re.sub(r"\s+", " ", line).strip(" -_.,:;")
-        low = line.lower()
-        if len(line) < 2 or any(w in low for w in IGNORE_NAME_WORDS) or re.search(r"\d", line):
-            continue
-        if not re.search(r"[A-Za-zÄÖÜäöüß]", line) or len(line) > 40:
-            continue
-        name = line
-        break
+    if idx is not None:
+        for raw in reversed(lines[:idx]):
+            name = _name_candidate(raw)
+            if name:
+                break
+    if not name:
+        for raw in lines:
+            name = _name_candidate(raw)
+            if name and not re.search(r"\d", name):
+                break
+            name = None
     return name, d, badges, followers, online
 
 
@@ -1094,7 +1159,7 @@ class Bot:
         self.state_path = self.data_dir / "state.json"
         self.tg = TelegramAPI(cfg["telegram_token"])
         self.fetcher = Fetcher(cfg, notify=self.broadcast)
-        self.anchors = AnchorStore(self.data_dir / "known_accounts.txt", cfg["seed_anchors"])
+        self.anchors = AnchorStore(self.data_dir / "known_accounts.txt", cfg["seed_anchors"], LEGACY_ANCHOR_FILES)
         self.lock = threading.RLock()
         self.state = self._load_state()
         self.job: Optional[Job] = Job(**self.state["job"]) if self.state.get("job") else None
