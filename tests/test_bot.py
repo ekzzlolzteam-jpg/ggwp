@@ -532,18 +532,22 @@ class TestButtonsUI(unittest.TestCase):
         self.assertNotIn("40300011", self.bot.state["watch"])
 
         self.text(kb.M_PROXY)
-        self.press("Изменить")
-        self.text("user:secret@1.2.3.4:5000")
-        self.assertEqual(self.bot.cfg["proxy_url"], "socks5://user:secret@1.2.3.4:5000")
+        self.press("Добавить")
+        self.text("user:secret@1.2.3.4:5000\n5.6.7.8:1080:u2:p2")      # сразу два прокси
+        p1, p2 = "socks5://user:secret@1.2.3.4:5000", "socks5://u2:p2@5.6.7.8:1080"
+        self.assertEqual(self.bot.cfg["proxy_urls"], [p1, p2])
         self.assertTrue(self.tg.deleted, "сообщение с паролем должно удаляться")
         self.assertNotIn("secret", self.tg.sent[-1])
+        self.assertIn(f"всего до {2 * self.bot.cfg['requests_per_second']}/с", self.tg.sent[-1])  # × 2 прокси
         saved = json.loads((Path(self.tmp.name) / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(saved["proxy_url"], "socks5://user:secret@1.2.3.4:5000")
-        self.press("12/с")
+        self.assertEqual(saved["proxy_urls"], [p1, p2])
         self.assertEqual(saved["telegram_token"], "x")
+        self.press("12/с")
         self.assertEqual(self.bot.cfg["requests_per_second"], 12)
-        self.press("без прокси")
-        self.assertEqual(self.bot.cfg["proxy_url"], "")
+        self.press("🗑 1.")
+        self.assertEqual(self.bot.cfg["proxy_urls"], [p2])
+        self.press("Удалить все")
+        self.assertEqual(kb.proxy_list(self.bot.cfg), [])
 
     def test_screenshot_goes_to_card(self):
         self.bot.tg.download = lambda file_id: b"img"
@@ -579,7 +583,7 @@ class TestRobustness(unittest.TestCase):
                 return Resp()
 
         f = kb.Fetcher(dict(CFG, max_retries=0))
-        f._local.session, f._local.gen = Sess(), 0
+        f._local.sessions, f._local.gen = {"": Sess()}, 0
         orig = kb.parse_profile_html
         kb.parse_profile_html = lambda *a: int("8203Elbe")
         try:
@@ -596,3 +600,110 @@ class TestRobustness(unittest.TestCase):
         self.assertEqual(kb.normalize_proxy("http://1.2.3.4:8080"), "http://1.2.3.4:8080")
         self.assertIsNone(kb.normalize_proxy("привет"))
         self.assertEqual(kb.mask_proxy("socks5://u:p@1.2.3.4:5000"), "socks5://u:***@1.2.3.4:5000")
+
+
+class TestSpeed(unittest.TestCase):
+    class Resp:
+        status_code, text = 404, ""
+
+    def fetcher_with_stub(self, cfg, code_for=lambda url: 404):
+        f = kb.Fetcher(cfg)
+        seen = []
+        outer = self
+
+        class Sess:
+            def __init__(self, url):
+                self.url = url
+
+            def get(self, *a, **k):
+                seen.append(self.url)
+                r = outer.Resp()
+                r.status_code = code_for(self.url)
+                return r
+
+        f._local.sessions, f._local.gen = {lane.url: Sess(lane.url) for lane in f.lanes}, 0
+        return f, seen
+
+    def test_two_proxies_double_the_speed(self):
+        cfg = dict(CFG, requests_per_second=10, proxy_urls=["socks5://a:1@1.1.1.1:1", "socks5://b:2@2.2.2.2:2"])
+        f, seen = self.fetcher_with_stub(cfg)
+        t0 = time.time()
+        for i in range(40):
+            f.get(i)
+        took = time.time() - t0
+        self.assertLess(took, 2.6, "2 прокси × 10/с = 40 запросов примерно за 2 с")
+        self.assertGreater(took, 1.5)
+        self.assertEqual(sorted(set(seen)), sorted(cfg["proxy_urls"]))
+        self.assertLess(abs(seen.count(cfg["proxy_urls"][0]) - 20), 3, "нагрузка делится поровну")
+
+    def test_block_pauses_only_that_proxy(self):
+        bad = "socks5://bad:1@1.1.1.1:1"
+        cfg = dict(CFG, requests_per_second=50, block_threshold=3, max_retries=1,
+                   proxy_urls=[bad, "socks5://good:2@2.2.2.2:2"])
+        f, seen = self.fetcher_with_stub(cfg, code_for=lambda url: 403 if url == bad else 404)
+        orig = kb.time.sleep
+        kb.time.sleep = lambda s: None          # без реальных пауз между повторами
+        try:
+            results = [f.get(i) for i in range(20)]
+        finally:
+            kb.time.sleep = orig
+        bad_lane = next(lane for lane in f.lanes if lane.url == bad)
+        self.assertGreater(bad_lane.pause_until, time.monotonic(), "плохой прокси на паузе")
+        self.assertEqual(f.paused_for(), 0, "но поиск не стоит — второй прокси работает")
+        self.assertTrue(all(r.status == "missing" for r in results[-5:]), "после паузы всё идёт через хороший")
+
+    def test_auto_workers(self):
+        f = kb.Fetcher(dict(CFG, requests_per_second=10, workers=0, proxy_urls=["socks5://a:1@1.1.1.1:1"]))
+        f.lanes[0].latency = 1.2
+        self.assertEqual(f.worker_count(), 24)              # 10/с × 1.2 с × 2
+        f.set_proxies(["socks5://a:1@1.1.1.1:1", "socks5://b:1@2.2.2.2:1", "socks5://c:1@3.3.3.3:1"])
+        self.assertEqual(f.worker_count(), 60)              # 30/с × 1 с × 2
+        self.assertEqual(kb.Fetcher(dict(CFG, workers=7)).worker_count(), 7)
+
+    def test_day_cache_makes_repeat_search_free(self):
+        site = FakeSite(error_rate=0)
+        d = date(2016, 9, 9)
+        ids = site.ids_on(d)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "days" / "2016-09-09.json"
+
+            def scan(name="Nobody"):
+                job = kb.Job(target=kb.Target(name, d).to_dict(), first=ids[0], last=ids[-1])
+                kb.Scanner(site, CFG, threading.Event(), threading.Event(), lambda m: None, lambda: None,
+                           cache=kb.DayCache(path, 30)).run(job)
+                return job
+
+            first = scan()
+            calls = site.calls
+            second = scan()
+            self.assertEqual(site.calls, calls, "повторный поиск по той же дате — без запросов")
+            self.assertEqual(second.cached, second.total)
+            self.assertEqual((second.profiles, second.missing), (first.profiles, first.missing))
+            # другая цель на ту же дату находится прямо по кэшу
+            third = scan(name=f"user{ids[5]}")
+            self.assertTrue(third.has_exact())
+            self.assertEqual(site.calls, calls)
+            # устаревший кэш не используется
+            self.assertEqual(len(kb.DayCache(path, 0)), 0)
+
+    def test_found_account_saved_to_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text('{"telegram_token": "x", "seed_anchors": [[46211501, "24.03.2017"]]}',
+                                encoding="utf-8")
+            bot = kb.Bot(dict(CFG, data_dir=tmp, allowed_chat_ids=["1"], telegram_token="x",
+                              seed_anchors=[[46211501, "24.03.2017"]]), cfg_path)
+            bot.tg = FakeTG()
+            bot.anchors = kb.AnchorStore(Path(tmp) / "a.txt")
+            bot.job = kb.Job(target=kb.Target("Arne", date(2016, 3, 5),
+                                              {"satisfaction": "TOP Zufriedenheit"}).to_dict())
+            bot._on_match(kb.Match("exact", 41000123, "Arne"))
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["found_accounts"][0]["id"], 41000123)
+            self.assertEqual(saved["found_accounts"][0]["date"], "05.03.2016")
+            self.assertIn([41000123, "05.03.2016"], saved["seed_anchors"])
+            self.assertIn([46211501, "24.03.2017"], saved["seed_anchors"])
+            self.assertIn((41000123, date(2016, 3, 5)), bot.anchors.items())
+            bot._on_match(kb.Match("exact", 41000123, "Arne"))          # повтор — без дублей
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(saved["found_accounts"]), 1)

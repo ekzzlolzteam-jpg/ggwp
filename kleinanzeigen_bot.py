@@ -61,8 +61,9 @@ DEFAULT_CONFIG: dict = {
     "allowed_chat_ids": [],          # кто может пользоваться ботом; им же идут уведомления
     # --- Сеть ---
     "proxy_url": "",                 # "socks5://user:pass@host:port" или KA_PROXY_URL
-    "requests_per_second": 8,        # общий лимит на все потоки
-    "workers": 6,                    # потоков при переборе
+    "proxy_urls": [],                # несколько прокси — скорость складывается
+    "requests_per_second": 8,        # лимит НА ОДИН прокси (IP)
+    "workers": 0,                    # потоков при переборе; 0 = подобрать автоматически
     "request_timeout": 15,
     "max_retries": 4,                # повторов на один ID при 403/5xx/таймауте
     "block_threshold": 20,           # столько блокировок подряд -> пауза
@@ -79,6 +80,9 @@ DEFAULT_CONFIG: dict = {
     "name_fuzzy_threshold": 0.85,
     "stop_on_exact_match": True,
     "auto_watch_on_match": True,
+    "save_found_to_config": True,    # найденный аккаунт → found_accounts и seed_anchors в config.json
+    "day_cache_days": 30,            # кэш проверенных ID по датам (повторный поиск без запросов)
+    "found_accounts": [],            # сюда бот сам дописывает найденные аккаунты
     # --- Мониторинг ---
     "monitor_minutes_min": 10,
     "monitor_minutes_max": 30,
@@ -102,8 +106,8 @@ def load_config(path: Path) -> dict:
     cfg["allowed_chat_ids"] = [str(x) for x in cfg["allowed_chat_ids"]]
     if cfg["monitor_minutes_min"] > cfg["monitor_minutes_max"]:
         raise ValueError("monitor_minutes_min больше monitor_minutes_max")
-    if cfg["requests_per_second"] <= 0 or cfg["workers"] <= 0:
-        raise ValueError("requests_per_second и workers должны быть > 0")
+    if cfg["requests_per_second"] <= 0 or cfg["workers"] < 0:
+        raise ValueError("requests_per_second должен быть > 0, workers — 0 (авто) или больше")
     return cfg
 
 
@@ -396,79 +400,138 @@ USER_AGENTS = [
 ]
 
 
+def proxy_list(cfg: dict) -> list[str]:
+    """Все прокси из настроек (proxy_urls + старый proxy_url). Пустой список = без прокси."""
+    urls = [u for u in (cfg.get("proxy_urls") or []) if u]
+    if cfg.get("proxy_url") and cfg["proxy_url"] not in urls:
+        urls.insert(0, cfg["proxy_url"])
+    return urls
+
+
+class Lane:
+    """Один «выход в интернет»: прокси или прямое соединение. У каждого свой лимит скорости
+    и своя авто-пауза: сайт ограничивает каждый IP отдельно."""
+
+    def __init__(self, url: str):
+        self.url = url
+        self.next_slot = 0.0
+        self.pause_until = 0.0
+        self.soft_until = 0.0
+        self.streak = 0
+        self.level = 0
+        self.requests = 0
+        self.blocked = 0
+        self.latency = 1.0          # среднее время ответа, сек
+
+    @property
+    def label(self) -> str:
+        return mask_proxy(self.url) if self.url else "без прокси"
+
+
 class Fetcher:
     def __init__(self, cfg: dict, notify: Callable[[str], None] = lambda _m: None):
         self.cfg = cfg
         self.notify = notify
         self._lock = threading.Lock()
-        self._next_slot = 0.0
-        self._pause_until = 0.0
-        self._soft_until = 0.0
-        self._blocked_streak = 0
-        self._block_level = 0
         self._local = threading.local()
         self._gen = 0                   # меняется при смене прокси -> сессии пересоздаются
+        self.lanes = [Lane(u) for u in proxy_list(cfg) or [""]]
         self.stats = {"requests": 0, "ok": 0, "missing": 0, "blocked": 0, "errors": 0}
 
-    def set_proxy(self, url: str) -> None:
+    def set_proxies(self, urls: list[str]) -> None:
         with self._lock:
-            self.cfg["proxy_url"] = url
+            self.lanes = [Lane(u) for u in urls or [""]]
             self._gen += 1
 
-    # --- сессии по потокам ---
-    def _session(self) -> requests.Session:
-        s = getattr(self._local, "session", None)
-        if s is None or getattr(self._local, "gen", -1) != self._gen:
+    def set_proxy(self, url: str) -> None:   # совместимость
+        self.set_proxies([url] if url else [])
+
+    @property
+    def total_rps(self) -> float:
+        return float(self.cfg["requests_per_second"]) * len(self.lanes)
+
+    def worker_count(self) -> int:
+        """Сколько потоков нужно, чтобы реально выйти на лимит скорости.
+        Поток ждёт ответа ~latency сек, поэтому нужно rps × latency потоков (+ запас)."""
+        if int(self.cfg.get("workers") or 0) > 0:
+            return int(self.cfg["workers"])
+        latency = max(0.5, max(lane.latency for lane in self.lanes))
+        return int(min(64, max(4, self.total_rps * latency * 2)))
+
+    # --- сессии: своя на каждый поток и прокси ---
+    def _session(self, lane: Lane) -> requests.Session:
+        sessions = getattr(self._local, "sessions", None)
+        if sessions is None or getattr(self._local, "gen", -1) != self._gen:
+            sessions = self._local.sessions = {}
+            self._local.gen = self._gen
+        s = sessions.get(lane.url)
+        if s is None:
             s = requests.Session()
             s.headers.update({
                 "User-Agent": random.choice(USER_AGENTS),
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "de-DE,de;q=0.9,en;q=0.6",
             })
-            if self.cfg.get("proxy_url"):
-                s.proxies.update({"http": self.cfg["proxy_url"], "https": self.cfg["proxy_url"]})
-            self._local.session = s
-            self._local.gen = self._gen
+            if lane.url:
+                s.proxies.update({"http": lane.url, "https": lane.url})
+            sessions[lane.url] = s
         return s
 
-    # --- лимит скорости (общий на все потоки) ---
-    def _wait_slot(self, stop: Optional[threading.Event]) -> bool:
+    # --- лимит скорости: выбираем прокси, который освободится раньше всех ---
+    def _acquire(self, stop: Optional[threading.Event]) -> Optional[Lane]:
         with self._lock:
             now = time.monotonic()
             rps = float(self.cfg["requests_per_second"])
-            if now < self._soft_until:
-                rps = max(1.0, rps / 3)
-            start = max(now, self._next_slot, self._pause_until)
-            self._next_slot = start + (1.0 / rps) * random.uniform(0.85, 1.15)
-        delay = start - time.monotonic()
+            best, best_start = None, None
+            for lane in self.lanes:
+                start = max(now, lane.next_slot, lane.pause_until)
+                if best is None or start < best_start:
+                    best, best_start = lane, start
+            lane_rps = max(1.0, rps / 3) if now < best.soft_until else rps
+            best.next_slot = best_start + (1.0 / lane_rps) * random.uniform(0.85, 1.15)
+        delay = best_start - time.monotonic()
         if delay > 0:
             if stop is not None:
-                return not stop.wait(delay)
+                return None if stop.wait(delay) else best
             time.sleep(delay)
-        return True
+        return best
 
     def paused_for(self) -> int:
-        return max(0, int(self._pause_until - time.monotonic()))
+        """Сколько секунд ещё ждать, если на паузе ВСЕ прокси (иначе 0)."""
+        now = time.monotonic()
+        return max(0, int(min(lane.pause_until for lane in self.lanes) - now))
 
-    def _on_success(self) -> None:
+    def lanes_info(self) -> list[str]:
+        now = time.monotonic()
+        out = []
+        for lane in self.lanes:
+            st = f"⛔ пауза {int(lane.pause_until - now) // 60 + 1} мин" if lane.pause_until > now else "✅"
+            out.append(f"{lane.label}: {st}, запросов {lane.requests:,}, блок. {lane.blocked}, "
+                       f"ответ ~{lane.latency:.1f} с")
+        return out
+
+    def _on_success(self, lane: Lane, latency: float) -> None:
         with self._lock:
-            self._blocked_streak = 0
+            lane.streak = 0
+            lane.latency = lane.latency * 0.9 + latency * 0.1
 
-    def _on_blocked(self) -> None:
+    def _on_blocked(self, lane: Lane) -> None:
         with self._lock:
             self.stats["blocked"] += 1
-            self._blocked_streak += 1
-            if self._blocked_streak < self.cfg["block_threshold"]:
+            lane.blocked += 1
+            lane.streak += 1
+            if lane.streak < self.cfg["block_threshold"]:
                 return
-            minutes = self.cfg["block_pause_minutes"] * (2 ** min(self._block_level, 3))
-            now = time.monotonic()
-            self._pause_until = now + minutes * 60
-            self._soft_until = self._pause_until + 180
-            self._block_level += 1
-            self._blocked_streak = 0
-        log.warning("Похоже на блокировку, пауза %s мин", minutes)
-        self.notify(f"⛔ Сайт режет запросы (403/429). Автопауза {minutes} мин, потом продолжу "
-                    f"на пониженной скорости. Ничего делать не нужно.")
+            minutes = self.cfg["block_pause_minutes"] * (2 ** min(lane.level, 3))
+            lane.pause_until = time.monotonic() + minutes * 60
+            lane.soft_until = lane.pause_until + 180
+            lane.level += 1
+            lane.streak = 0
+            others = sum(1 for x in self.lanes if x is not lane and x.pause_until <= time.monotonic())
+        log.warning("Блокировка на %s, пауза %s мин", lane.label, minutes)
+        tail = f" Остальные прокси ({others}) продолжают работать." if others else \
+            " Потом продолжу на пониженной скорости, ничего делать не нужно."
+        self.notify(f"⛔ Сайт режет запросы через {lane.label} (403/429). Пауза для него {minutes} мин.{tail}")
 
     def get(self, user_id: int, stop: Optional[threading.Event] = None) -> FetchResult:
         url = PROFILE_URL.format(uid=user_id)
@@ -476,16 +539,20 @@ class Fetcher:
         for attempt in range(self.cfg["max_retries"] + 1):
             if stop is not None and stop.is_set():
                 return FetchResult("error", error="stopped")
-            if not self._wait_slot(stop):
+            lane = self._acquire(stop)
+            if lane is None:
                 return FetchResult("error", error="stopped")
             blocked = False
+            t0 = time.monotonic()
             try:
-                resp = self._session().get(url, timeout=self.cfg["request_timeout"])
+                resp = self._session(lane).get(url, timeout=self.cfg["request_timeout"])
+                elapsed = time.monotonic() - t0
                 with self._lock:
                     self.stats["requests"] += 1
+                    lane.requests += 1
                 code = resp.status_code
                 if code in (404, 410):
-                    self._on_success()
+                    self._on_success(lane, elapsed)
                     with self._lock:
                         self.stats["missing"] += 1
                     return FetchResult("missing", http_code=code)
@@ -503,7 +570,7 @@ class Fetcher:
                         if prof.page_user_id not in (None, user_id):
                             prof.name = prof.aktiv_seit = None   # редирект на чужой профиль
                         if prof.aktiv_seit or prof.name:
-                            self._on_success()
+                            self._on_success(lane, elapsed)
                             with self._lock:
                                 self.stats["ok"] += 1
                             return FetchResult("ok", profile=prof, http_code=code)
@@ -511,7 +578,7 @@ class Fetcher:
                         blocked = True
                         last = FetchResult("error", http_code=code, error="block page")
                     else:
-                        self._on_success()
+                        self._on_success(lane, elapsed)
                         with self._lock:
                             self.stats["missing"] += 1
                         return FetchResult("missing", http_code=code)
@@ -523,7 +590,7 @@ class Fetcher:
             except Exception as exc:   # requests / socks / ssl — всё считаем сетевой ошибкой
                 last = FetchResult("error", error=type(exc).__name__)
             if blocked:
-                self._on_blocked()
+                self._on_blocked(lane)
             backoff = min(30.0, 1.5 * (2 ** attempt)) * random.uniform(0.7, 1.3)
             if stop is not None:
                 if stop.wait(backoff):
@@ -886,6 +953,7 @@ class Job:
     missing: int = 0
     error_ids: list = field(default_factory=list)
     matches: list = field(default_factory=list)   # dict(Match)
+    cached: int = 0                                # сколько ID взято из кэша дня (без запросов)
     started: float = field(default_factory=time.time)
     message: str = ""
 
@@ -897,28 +965,103 @@ class Job:
         return any(m["level"] == "exact" for m in self.matches)
 
 
+class DayCache:
+    """Кэш проверенных ID одной даты: повторный поиск по той же дате (другой скрин,
+    «Продолжить», перепроверка) не тратит запросы на уже проверенные ID.
+    Формат: uid -> [имя, дата, плашки, подписчики] или 0 (профиля нет)."""
+
+    def __init__(self, path: Path, max_age_days: float):
+        self.path = path
+        self.lock = threading.Lock()
+        self.created = time.time()
+        self.data: dict[str, object] = {}
+        if max_age_days > 0 and path.exists():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if time.time() - raw.get("created", 0) < max_age_days * 86400:
+                    self.created, self.data = raw["created"], raw["ids"]
+            except (OSError, ValueError, KeyError) as exc:
+                log.warning("Кэш %s не прочитан: %s", path.name, exc)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def get(self, uid: int) -> Optional[FetchResult]:
+        v = self.data.get(str(uid))
+        if v is None:
+            return None
+        if v == 0:
+            return FetchResult("missing", error="cache")
+        name, d, badges, followers = v
+        return FetchResult("ok", error="cache",
+                           profile=Profile(uid, name, parse_date(d) if d else None, badges or {}, followers=followers))
+
+    def put(self, uid: int, res: FetchResult) -> None:
+        with self.lock:
+            if res.status == "missing":
+                self.data[str(uid)] = 0
+            elif res.status == "ok" and res.profile:
+                p = res.profile
+                self.data[str(uid)] = [p.name, fmt_date(p.aktiv_seit) if p.aktiv_seit else None, p.badges, p.followers]
+
+    def save(self) -> None:
+        with self.lock:
+            payload = json.dumps({"created": self.created, "ids": self.data}, ensure_ascii=False, separators=(",", ":"))
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(self.path)
+
+
 class Scanner:
     def __init__(self, fetcher, cfg: dict, stop: threading.Event, pause: threading.Event,
-                 on_match: Callable[[Match], None], save: Callable[[], None]):
+                 on_match: Callable[[Match], None], save: Callable[[], None],
+                 cache: Optional[DayCache] = None, on_sample: Callable[[Profile], None] = lambda _p: None):
         self.fetcher = fetcher
         self.cfg = cfg
         self.stop = stop
         self.pause = pause
         self.on_match = on_match
         self.save = save
+        self.cache = cache
+        self.on_sample = on_sample   # по одному профилю из пачки — в базу якорей
+
+    def _workers(self) -> int:
+        wc = getattr(self.fetcher, "worker_count", None)
+        return wc() if wc else max(1, int(self.cfg.get("workers") or 6))
 
     def _wait_if_paused(self) -> None:
         while self.pause.is_set() and not self.stop.is_set():
             time.sleep(0.5)
 
-    def _process(self, job: Job, target: Target, ids: list[int], pool: ThreadPoolExecutor) -> bool:
-        """Проверяет пачку ID. Возвращает False, если поиск остановили посреди пачки."""
-        results = list(pool.map(lambda uid: (uid, self.fetcher.get(uid, self.stop)), ids))
+    def _submit(self, ids: list[int], pool: ThreadPoolExecutor) -> list:
+        """Запускает загрузку пачки. ID из кэша дня не запрашиваются."""
+        out = []
+        for uid in ids:
+            cached = self.cache.get(uid) if self.cache is not None else None
+            out.append((uid, cached if cached else pool.submit(self.fetcher.get, uid, self.stop)))
+        return out
+
+    def _collect(self, job: Job, target: Target, batch: list) -> bool:
+        """Обрабатывает пачку. Возвращает False, если поиск остановили посреди пачки."""
+        results = []
+        for uid, item in batch:
+            res = item if isinstance(item, FetchResult) else item.result()
+            results.append((uid, res))
         if any(r.error == "stopped" for _, r in results):
             return False
+        sampled = False
         for uid, res in results:
+            from_cache = res.error == "cache"
+            if from_cache:
+                job.cached += 1
+            elif self.cache is not None:
+                self.cache.put(uid, res)
             if res.status == "ok" and res.profile:
                 job.profiles += 1
+                if not from_cache and not sampled and res.profile.aktiv_seit:
+                    self.on_sample(res.profile)
+                    sampled = True
                 m = match_profile(target, res.profile, self.cfg["name_fuzzy_threshold"])
                 if m and not any(x["user_id"] == uid for x in job.matches):
                     job.matches.append(asdict(m))
@@ -934,23 +1077,51 @@ class Scanner:
             job.checked += 1
         return True
 
+    def _run_chunks(self, job: Job, target: Target, chunks: Iterable[list[int]], pool: ThreadPoolExecutor,
+                    advance_cursor: bool) -> bool:
+        """Конвейер: следующая пачка уже качается, пока обрабатывается текущая —
+        один медленный запрос не останавливает остальные потоки."""
+        pending: list = []
+        chunks = iter(chunks)
+        # сколько ID держать «в работе»: с запасом на зависшие запросы (таймаут прокси, повтор с паузой)
+        depth = max(2 * int(self.cfg["chunk_size"]), self._workers() * 6)
+        try:
+            while True:
+                while (len(pending) < 2 or sum(len(i) for i, _ in pending) < depth) and not self.stop.is_set():
+                    ids = next(chunks, None)
+                    if ids is None:
+                        break
+                    pending.append((ids, self._submit(ids, pool)))
+                if not pending:
+                    return not self.stop.is_set()
+                ids, batch = pending.pop(0)
+                if not self._collect(job, target, batch):
+                    return False
+                if advance_cursor:
+                    job.cursor = ids[-1] + 1
+                self.save()
+                if advance_cursor and self.cfg["stop_on_exact_match"] and job.has_exact():
+                    return False
+                self._wait_if_paused()
+                if self.stop.is_set():
+                    return False
+        finally:
+            for _, batch in pending:             # недоделанные пачки отменяем
+                for _, item in batch:
+                    if not isinstance(item, FetchResult):
+                        item.cancel()
+            if self.cache is not None:
+                self.cache.save()
+
     def run(self, job: Job) -> None:
         target = Target.from_dict(job.target)
         size = max(1, int(self.cfg["chunk_size"]))
         if job.cursor is None:
             job.cursor = job.first
-        with ThreadPoolExecutor(max_workers=self.cfg["workers"]) as pool:
-            while job.cursor <= job.last:
-                self._wait_if_paused()
-                if self.stop.is_set():
-                    return
-                ids = list(range(job.cursor, min(job.cursor + size - 1, job.last) + 1))
-                if not self._process(job, target, ids, pool):
-                    return
-                job.cursor = ids[-1] + 1
-                self.save()
-                if self.cfg["stop_on_exact_match"] and job.has_exact():
-                    return
+        chunks = (list(range(c, min(c + size - 1, job.last) + 1)) for c in range(job.cursor, job.last + 1, size))
+        with ThreadPoolExecutor(max_workers=self._workers()) as pool:
+            if not self._run_chunks(job, target, chunks, pool, advance_cursor=True):
+                return
             # автоматическая перепроверка ID с ошибками (до 3 кругов, пока их становится меньше)
             for _ in range(3):
                 before = len(job.error_ids)
@@ -965,14 +1136,11 @@ class Scanner:
         if not ids:
             return 0
         own = pool is None
-        pool = pool or ThreadPoolExecutor(max_workers=self.cfg["workers"])
+        pool = pool or ThreadPoolExecutor(max_workers=self._workers())
         try:
             size = max(1, int(self.cfg["chunk_size"]))
-            for i in range(0, len(ids), size):
-                self._wait_if_paused()
-                if self.stop.is_set() or not self._process(job, Target.from_dict(job.target), ids[i:i + size], pool):
-                    break
-                self.save()
+            self._run_chunks(job, Target.from_dict(job.target), (ids[i:i + size] for i in range(0, len(ids), size)),
+                             pool, advance_cursor=False)
         finally:
             if own:
                 pool.shutdown(wait=True)
@@ -1093,6 +1261,23 @@ def parse_ocr_text(text: str) -> tuple[Optional[str], Optional[date], dict, Opti
     return name, d, badges, followers, online
 
 
+def find_tesseract(tesseract_cmd: str = "") -> Optional[str]:
+    """Путь к tesseract: из настроек, из PATH или из стандартных папок Windows."""
+    import shutil
+    if tesseract_cmd:
+        return tesseract_cmd
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+        candidate = Path(base) / "Tesseract-OCR" / "tesseract.exe"
+        if base and candidate.exists():
+            return str(candidate)
+    return None
+
+
 def ocr_image(image_bytes: bytes, tesseract_cmd: str = "") -> str:
     try:
         import pytesseract
@@ -1100,11 +1285,9 @@ def ocr_image(image_bytes: bytes, tesseract_cmd: str = "") -> str:
     except ImportError as exc:
         raise RuntimeError("OCR не установлен: pip install pytesseract pillow и установи Tesseract-OCR "
                            "(или отправь данные текстом)") from exc
-    win_default = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
-    if tesseract_cmd:
-        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-    elif win_default.exists():
-        pytesseract.pytesseract.tesseract_cmd = str(win_default)
+    cmd = find_tesseract(tesseract_cmd)
+    if cmd:
+        pytesseract.pytesseract.tesseract_cmd = cmd
     img = ImageOps.grayscale(Image.open(io.BytesIO(image_bytes)))
     if img.width < 1600:
         k = 1600 / img.width
@@ -1363,10 +1546,36 @@ class Bot:
             hist = [h for h in self.state["history"] if h.get("started") != job.started]
             self.state["history"] = (hist + [entry])[-30:]
 
+    def make_scanner(self, job: Job) -> Scanner:
+        day = Target.from_dict(job.target).aktiv_seit
+        cache = DayCache(self.data_dir / "days" / f"{day.isoformat()}.json", float(self.cfg["day_cache_days"]))
+        return Scanner(self.fetcher, self.cfg, self.stop_event, self.pause_event, self._on_match, self.save,
+                       cache=cache, on_sample=lambda p: self.anchors.add(p.user_id, p.aktiv_seit))
+
+    def remember_found(self, m: Match) -> None:
+        """Найденный аккаунт: дата → база якорей (ускоряет следующие поиски) и запись в config.json."""
+        if not self.job:
+            return
+        t = Target.from_dict(self.job.target)
+        self.anchors.add(m.user_id, t.aktiv_seit)
+        self.anchors.flush()
+        if not self.cfg.get("save_found_to_config", True):
+            return
+        found = [f for f in self.cfg.get("found_accounts") or [] if f.get("id") != m.user_id]
+        found.append({"id": m.user_id, "name": m.name, "date": fmt_date(t.aktiv_seit), "badges": badges_str(t.badges),
+                      "level": m.level, "url": m.url, "found": time.strftime("%d.%m.%Y %H:%M")})
+        seeds = [x for x in self.cfg.get("seed_anchors") or [] if int(x[0]) != m.user_id]
+        seeds.append([m.user_id, fmt_date(t.aktiv_seit)])
+        self.save_config(found_accounts=found, seed_anchors=seeds)
+
     def _on_match(self, m: Match) -> None:
         if m.level == "conflict":
             log.info("Совпало имя, но не плашки: %s %s", m.user_id, m.notes)
             return   # покажем в итоговом отчёте
+        try:
+            self.remember_found(m)
+        except Exception:
+            log.exception("Не удалось сохранить найденный аккаунт")
         head = "🎯 НАЙДЕН ПОЛЬЗОВАТЕЛЬ!" if m.level == "exact" else "🤔 Возможное совпадение"
         notes = ("\n" + "\n".join("• " + n for n in m.notes)) if m.notes else ""
         self.broadcast(f"{head}\n{m.name} (ID {m.user_id})\n{m.url}{notes}",
@@ -1389,7 +1598,7 @@ class Bot:
                                f"Запросов на поиск диапазона: {locator.requests}. Начинаю перебор…")
             job.status = "scanning"
             self.phase = "перебор"
-            scanner = Scanner(self.fetcher, self.cfg, self.stop_event, self.pause_event, self._on_match, self.save)
+            scanner = self.make_scanner(job)
             scanner.run(job)
             job.status = "stopped" if self.stop_event.is_set() else "done"
         except LocateError as exc:
@@ -1423,6 +1632,8 @@ class Bot:
         if job.first is not None:
             lines.append(f"Диапазон: {job.first:,}–{job.last:,}; проверено {job.checked:,}/{job.total:,} "
                          f"(профилей {job.profiles:,}, пустых {job.missing:,}, ошибок {len(job.error_ids)})")
+            if job.cached:
+                lines.append(f"♻️ Из кэша дня (без запросов): {job.cached:,} ID")
         lines += self._matches_lines(job.matches)
         if job.error_ids and not job.has_exact():
             lines.append(f"\n⚠️ {len(job.error_ids)} ID не удалось проверить — «{M_TASKS}» → 🔁 Перепроверить")
@@ -1469,7 +1680,7 @@ class Bot:
                 parts.append(f"Проверено {job.checked:,}/{job.total:,} ({pct:.1f}%)"
                              + (f", осталось ~{eta:.0f} мин" if self.job_running() else ""))
                 parts.append(f"Профилей {job.profiles:,}, пустых {job.missing:,}, ошибок {len(job.error_ids)}, "
-                             f"совпадений {len(job.matches)}")
+                             f"совпадений {len(job.matches)}" + (f", из кэша {job.cached:,}" if job.cached else ""))
             if job.message:
                 parts.append(job.message)
         else:
@@ -1482,8 +1693,14 @@ class Bot:
         s = getattr(self.fetcher, "stats", None)
         if s:
             parts.append(f"Запросов: {s['requests']:,} (блокировок {s['blocked']}, ошибок {s['errors']})")
-        parts.append(f"Скорость: {self.cfg['requests_per_second']}/с · прокси: "
-                     f"{'да' if self.cfg.get('proxy_url') else 'нет'}")
+        lanes = getattr(self.fetcher, "lanes", None) or []
+        n_proxy = len(proxy_list(self.cfg))
+        total = self.cfg["requests_per_second"] * max(1, n_proxy)
+        workers = getattr(self.fetcher, "worker_count", lambda: self.cfg["workers"])()
+        parts.append(f"Скорость: до {total} запр/с ({self.cfg['requests_per_second']}/с × "
+                     f"{n_proxy or 1} {'прокси' if n_proxy else 'прямое соединение'}), потоков {workers}")
+        if lanes and any(lane.pause_until > time.monotonic() for lane in lanes):
+            parts += ["  " + x for x in self.fetcher.lanes_info()]
         parts.append(f"Мониторинг: {len(self.state['watch'])} акк. · якорей в базе: {len(self.anchors):,}")
         return "\n".join(parts)
 
@@ -1753,51 +1970,64 @@ class Bot:
     # прокси и скорость
     # ------------------------------------------------------------------
     def screen_proxy(self, chat_id: str, msg_id: Optional[int] = None, note: str = "") -> None:
-        proxy = self.cfg.get("proxy_url", "")
-        lines = ["🌐 Прокси и скорость", f"Прокси: {mask_proxy(proxy)}",
-                 f"Скорость: {self.cfg['requests_per_second']} запросов/сек, потоков {self.cfg['workers']}"]
-        paused = getattr(self.fetcher, "paused_for", lambda: 0)()
-        if paused:
-            lines.append(f"⛔ Сейчас автопауза из-за блокировки: ещё {paused // 60 + 1} мин")
+        proxies = proxy_list(self.cfg)
+        rps = self.cfg["requests_per_second"]
+        workers = getattr(self.fetcher, "worker_count", lambda: self.cfg["workers"])()
+        lines = ["🌐 Прокси и скорость"]
+        if proxies:
+            info = self.fetcher.lanes_info() if hasattr(self.fetcher, "lanes_info") else [mask_proxy(p) for p in proxies]
+            lines += [f"{i + 1}. {x}" for i, x in enumerate(info)]
+        else:
+            lines.append("Прокси нет — запросы идут напрямую с этого компьютера.")
+        lines.append(f"\nСкорость: {rps}/с на каждый прокси → всего до {rps * max(1, len(proxies))}/с, "
+                     f"потоков {workers} (подбираются сами)")
+        lines.append("Больше прокси = быстрее поиск: сайт ограничивает каждый IP отдельно.")
         if note:
             lines.append("\n" + note)
-        rps = self.cfg["requests_per_second"]
-        rows = [[btn("🧪 Проверить", "p:test"), btn("✏️ Изменить", "p:set")]]
-        if proxy:
-            rows.append([btn("🚫 Работать без прокси", "p:off")])
+        rows = [[btn(f"🗑 {i + 1}. {mask_proxy(p)[:30]}", f"p:del:{i}")] for i, p in enumerate(proxies)]
+        rows.append([btn("➕ Добавить", "p:set")] + ([btn("🧪 Проверить", "p:test")] if proxies else []))
+        if proxies:
+            rows.append([btn("🚫 Удалить все (без прокси)", "p:off")])
         rows.append([btn(("✅" if r == rps else "") + f"{r}/с", f"p:rps:{r}") for r in RPS_CHOICES])
         self.show(chat_id, "\n".join(lines), rows, msg_id)
 
-    def set_proxy(self, url: str) -> None:
-        self.fetcher.set_proxy(url) if hasattr(self.fetcher, "set_proxy") else None
-        self.save_config(proxy_url=url)
+    def set_proxies(self, urls: list[str]) -> None:
+        if hasattr(self.fetcher, "set_proxies"):
+            self.fetcher.set_proxies(urls)
+        self.save_config(proxy_url="", proxy_urls=urls)
 
-    def proxy_test(self, chat_id: str) -> None:
-        proxy = self.cfg.get("proxy_url", "")
+    def set_proxy(self, url: str) -> None:   # совместимость
+        self.set_proxies([url] if url else [])
+
+    @staticmethod
+    def _test_one(proxy: str, uid: int) -> str:
         s = requests.Session()
         s.headers["User-Agent"] = USER_AGENTS[0]
         if proxy:
             s.proxies.update({"http": proxy, "https": proxy})
-        lines = [f"🧪 Проверка: {mask_proxy(proxy)}"]
+        head = mask_proxy(proxy) if proxy else "без прокси"
         try:
             ip = s.get("https://api.ipify.org?format=json", timeout=20).json().get("ip")
-            lines.append(f"✅ Соединение есть, внешний IP: {ip}")
         except Exception as exc:
-            lines.append(f"❌ Нет соединения через прокси: {type(exc).__name__}: {str(exc)[:120]}")
-            self.tg.send(chat_id, "\n".join(lines))
-            return
-        anchors = self.anchors.items()
-        uid = anchors[-1][0] if anchors else 46211501
+            return f"❌ {head}: нет соединения ({type(exc).__name__})"
         try:
             t0 = time.time()
             r = s.get(PROFILE_URL.format(uid=uid), timeout=25)
-            ok = r.status_code == 200 and looks_like_profile(r.text)
-            lines.append(("✅ Kleinanzeigen открывается" if ok else f"⚠️ Kleinanzeigen ответил {r.status_code}"
-                          + (" (похоже на блокировку)" if r.status_code in (403, 429) or looks_blocked(r.text) else ""))
-                         + f", {time.time() - t0:.1f} с")
+            dt = time.time() - t0
+            if r.status_code == 200 and looks_like_profile(r.text):
+                return f"✅ {head}: IP {ip}, Kleinanzeigen открывается за {dt:.1f} с"
+            why = " — похоже на блокировку" if r.status_code in (403, 429) or looks_blocked(r.text) else ""
+            return f"⚠️ {head}: IP {ip}, Kleinanzeigen ответил {r.status_code}{why}"
         except Exception as exc:
-            lines.append(f"❌ Kleinanzeigen не открывается: {type(exc).__name__}")
-        self.tg.send(chat_id, "\n".join(lines), [[btn("🌐 Прокси", "p:menu")]])
+            return f"❌ {head}: IP {ip}, Kleinanzeigen не открывается ({type(exc).__name__})"
+
+    def proxy_test(self, chat_id: str) -> None:
+        anchors = self.anchors.items()
+        uid = anchors[-1][0] if anchors else 46211501
+        proxies = proxy_list(self.cfg) or [""]
+        with ThreadPoolExecutor(max_workers=min(8, len(proxies))) as pool:
+            lines = list(pool.map(lambda p: self._test_one(p, uid), proxies))
+        self.tg.send(chat_id, "🧪 Проверка прокси:\n" + "\n".join(lines), [[btn("🌐 Прокси", "p:menu")]])
 
     # ------------------------------------------------------------------
     # входящие: текст, фото, кнопки
@@ -1866,17 +2096,24 @@ class Bot:
         self.ask_name(chat_id)
 
     def handle_proxy_input(self, chat_id: str, text: str, message_id: Optional[int] = None) -> None:
-        url = normalize_proxy(text)
+        """Один или несколько прокси (по одному в строке) добавляются к списку."""
         if message_id:
             self.tg.delete(chat_id, message_id)   # не оставляем пароль прокси в переписке
-        if not url:
-            self.tg.send(chat_id, "Не похоже на прокси. Примеры:\nsocks5://логин:пароль@1.2.3.4:5000\n"
-                                  "логин:пароль@1.2.3.4:5000\n1.2.3.4:5000:логин:пароль",
+        lines = [ln for ln in re.split(r"[\s,;]+", text.strip()) if ln]
+        urls = [normalize_proxy(ln) for ln in lines]
+        if not urls or any(u is None for u in urls):
+            bad = [ln for ln, u in zip(lines, urls) if u is None]
+            self.tg.send(chat_id, f"Не похоже на прокси: {mask_proxy(bad[0]) if bad else '(пусто)'}\nПримеры:\n"
+                                  "socks5://логин:пароль@1.2.3.4:5000\nлогин:пароль@1.2.3.4:5000\n"
+                                  "1.2.3.4:5000:логин:пароль\nМожно несколько — каждый с новой строки.",
                          [[btn("❌ Отмена", "p:menu")]])
             return
         self.ui(chat_id)["step"] = None
-        self.set_proxy(url)
-        self.screen_proxy(chat_id, note="✅ Прокси сохранён (сообщение с паролем удалено). Нажми «🧪 Проверить».")
+        current = proxy_list(self.cfg)
+        added = [u for u in dict.fromkeys(urls) if u not in current]
+        self.set_proxies(current + added)
+        self.screen_proxy(chat_id, note=f"✅ Добавлено прокси: {len(added)} (сообщение с паролем удалено). "
+                                        f"Нажми «🧪 Проверить».")
 
     def handle_command(self, chat_id: str, text: str) -> None:
         cmd, _, arg = text.partition(" ")
@@ -1944,8 +2181,7 @@ class Bot:
             self.stop_event.clear()
 
             def _run():
-                Scanner(self.fetcher, self.cfg, self.stop_event, self.pause_event, self._on_match,
-                        self.save).recheck(job)
+                self.make_scanner(job).recheck(job)
                 self._archive(job)
                 self.save()
                 self.broadcast(self.report(job), self._watch_buttons(job.matches))
@@ -2056,12 +2292,18 @@ class Bot:
             act = parts[1]
             if act == "set":
                 u["step"] = "proxy"
-                self.show(chat_id, "✏️ Пришли прокси одним сообщением, например:\n"
+                self.show(chat_id, "➕ Пришли прокси одним сообщением, например:\n"
                                    "socks5://логин:пароль@1.2.3.4:5000\n"
+                                   "Можно сразу несколько — каждый с новой строки.\n"
                                    "(сообщение с паролем я сразу удалю из чата)", [[btn("❌ Отмена", "p:menu")]], msg_id)
                 return
             if act == "off":
-                self.set_proxy("")
+                self.set_proxies([])
+            elif act == "del":
+                current = proxy_list(self.cfg)
+                i = int(parts[2])
+                if 0 <= i < len(current):
+                    self.set_proxies(current[:i] + current[i + 1:])
             elif act == "rps":
                 self.save_config(requests_per_second=int(parts[2]))
             elif act == "test":
@@ -2115,8 +2357,8 @@ class Bot:
         if not me:
             sys.exit("❌ Telegram не отвечает или неверный telegram_token")
         log.info("Бот @%s запущен. Разрешённые чаты: %s", me.get("username"), self.cfg["allowed_chat_ids"] or "—")
-        if self.cfg.get("proxy_url"):
-            log.info("Прокси для сайта: %s", mask_proxy(self.cfg["proxy_url"]))
+        for proxy in proxy_list(self.cfg):
+            log.info("Прокси для сайта: %s", mask_proxy(proxy))
         self.tg.call("setMyCommands", commands=[{"command": "start", "description": "Меню и помощь"},
                                                 {"command": "status", "description": "Статус"},
                                                 {"command": "cancel", "description": "Сбросить ввод"}])
@@ -2170,7 +2412,87 @@ def setup_logging(data_dir: Path) -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+def run_check() -> int:
+    """python kleinanzeigen_bot.py --check — проверка всего, что нужно для работы."""
+    problems = 0
+
+    def line(good: bool, text: str, fix: str = "", warn: bool = False) -> None:
+        nonlocal problems
+        mark = "✅" if good else ("⚠️ " if warn else "❌")
+        print(f"{mark} {text}")
+        if not good:
+            if not warn:
+                problems += 1
+            if fix:
+                print(f"     → {fix}")
+
+    print("🔧 Проверка установки\n")
+    line(sys.version_info >= (3, 9), f"Python {sys.version.split()[0]}", "нужен Python 3.9 или новее")
+    import bs4
+    bs_ver = tuple(int(x) for x in re.findall(r"\d+", bs4.__version__)[:2])
+    line(bs_ver >= (4, 13), f"beautifulsoup4 {bs4.__version__}", "pip install -U beautifulsoup4", warn=True)
+    line(True, f"requests {requests.__version__}")
+    cfg_path = BASE_DIR / "config.json"
+    cfg = load_config(cfg_path) if cfg_path.exists() else dict(DEFAULT_CONFIG)
+    line(cfg_path.exists(), "config.json", "запусти: python kleinanzeigen_bot.py --setup")
+    proxies = proxy_list(cfg)
+    if any(p.startswith("socks") for p in proxies):
+        import importlib.util
+        line(importlib.util.find_spec("socks") is not None, "PySocks (для socks5-прокси)",
+             "pip install PySocks")
+
+    print("\n📸 OCR (распознавание скриншотов)")
+    try:
+        import pytesseract
+        import PIL
+        line(True, f"pytesseract и Pillow {PIL.__version__}")
+        cmd = find_tesseract(cfg.get("tesseract_cmd", ""))
+        if cmd:
+            pytesseract.pytesseract.tesseract_cmd = cmd
+        try:
+            ver = pytesseract.get_tesseract_version()
+            line(True, f"Tesseract {ver} — {cmd or 'из PATH'}")
+            langs = pytesseract.get_languages(config="")
+            line("deu" in langs, f"языки: {', '.join(sorted(langs))}",
+                 "нет немецкого (deu): переустанови Tesseract с галочкой German или положи deu.traineddata "
+                 "в папку tessdata (см. README)", warn=True)
+            sample = BASE_DIR / "tests" / "samples" / "screen_arne.png"
+            if sample.exists():
+                name, d, badges, _, _ = parse_ocr_text(ocr_image(sample.read_bytes(), cfg.get("tesseract_cmd", "")))
+                good = name == "Arne Schwarzmann" and d == date(2016, 3, 5) and len(badges) == 2
+                line(good, f"тестовый скрин распознан: {name}, {fmt_date(d)}, {badges_str(badges)}",
+                     "распознавание неточное — проверь язык deu", warn=True)
+        except Exception as exc:
+            line(False, f"Tesseract не найден ({type(exc).__name__})",
+                 "установи Tesseract-OCR (см. README) или укажи путь в tesseract_cmd в config.json")
+    except ImportError:
+        line(False, "pytesseract/Pillow не установлены", "pip install -r requirements.txt")
+
+    print("\n🌐 Сеть")
+    token = cfg.get("telegram_token") or ""
+    if TOKEN_RE.match(token):
+        try:
+            me = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=15).json()
+            line(bool(me.get("ok")), f"Telegram-бот @{(me.get('result') or {}).get('username', '?')}",
+                 f"Telegram ответил: {me.get('description')}")
+        except requests.RequestException as exc:
+            line(False, f"Telegram недоступен: {type(exc).__name__}")
+    else:
+        line(False, "telegram_token не задан", "python kleinanzeigen_bot.py --setup")
+    anchors = AnchorStore(BASE_DIR / cfg["data_dir"] / "known_accounts.txt", cfg["seed_anchors"], LEGACY_ANCHOR_FILES)
+    line(len(anchors) > 10, f"база якорей: {len(anchors)} записей")
+    uid = anchors.items()[-1][0] if len(anchors) else 46211501
+    for p in proxies or [""]:
+        res = Bot._test_one(p, uid)
+        line(res.startswith("✅"), res[2:].strip(),
+             "проверь логин/пароль/адрес прокси" if p else "нет интернета или сайт не открывается с этого IP")
+    print("\n" + ("Всё готово 👍" if not problems else f"Проблем: {problems} — исправь пункты с ❌"))
+    return 1 if problems else 0
+
+
 def main() -> None:
+    if "--check" in sys.argv:
+        sys.exit(run_check())
     if "--selftest" in sys.argv:
         import unittest
         sys.path.insert(0, str(BASE_DIR / "tests"))
