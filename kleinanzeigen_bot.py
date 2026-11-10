@@ -78,11 +78,8 @@ DEFAULT_CONFIG: dict = {
     # --- Перебор ---
     "chunk_size": 200,
     "name_fuzzy_threshold": 0.85,
-    "stop_on_exact_match": True,
-    "auto_watch_on_match": True,
-    "save_found_to_config": True,    # найденный аккаунт → found_accounts и seed_anchors в config.json
-    "day_cache_days": 30,            # кэш проверенных ID по датам (повторный поиск без запросов)
-    "found_accounts": [],            # сюда бот сам дописывает найденные аккаунты
+    "auto_watch_on_match": True,     # «✅ Это он» или единственное точное совпадение → мониторинг
+    "max_parallel_searches": 5,      # сколько поисков идут одновременно (делят общую скорость)
     # --- Мониторинг ---
     "monitor_minutes_min": 10,
     "monitor_minutes_max": 30,
@@ -92,11 +89,16 @@ DEFAULT_CONFIG: dict = {
 }
 
 
+OBSOLETE_KEYS = ("stop_on_exact_match", "save_found_to_config", "day_cache_days", "found_accounts")
+
+
 def load_config(path: Path) -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if path.exists():
         with path.open(encoding="utf-8") as fh:
             user_cfg = json.load(fh)
+        for old in OBSOLETE_KEYS:          # настройки прошлых версий — молча убираем
+            user_cfg.pop(old, None)
         unknown = {k for k in user_cfg if not k.startswith("_")} - set(DEFAULT_CONFIG)
         if unknown:
             print(f"⚠️  Неизвестные ключи в {path.name}: {', '.join(sorted(unknown))}")
@@ -953,7 +955,6 @@ class Job:
     missing: int = 0
     error_ids: list = field(default_factory=list)
     matches: list = field(default_factory=list)   # dict(Match)
-    cached: int = 0                                # сколько ID взято из кэша дня (без запросов)
     started: float = field(default_factory=time.time)
     message: str = ""
 
@@ -965,66 +966,18 @@ class Job:
         return any(m["level"] == "exact" for m in self.matches)
 
 
-class DayCache:
-    """Кэш проверенных ID одной даты: повторный поиск по той же дате (другой скрин,
-    «Продолжить», перепроверка) не тратит запросы на уже проверенные ID.
-    Формат: uid -> [имя, дата, плашки, подписчики] или 0 (профиля нет)."""
-
-    def __init__(self, path: Path, max_age_days: float):
-        self.path = path
-        self.lock = threading.Lock()
-        self.created = time.time()
-        self.data: dict[str, object] = {}
-        if max_age_days > 0 and path.exists():
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if time.time() - raw.get("created", 0) < max_age_days * 86400:
-                    self.created, self.data = raw["created"], raw["ids"]
-            except (OSError, ValueError, KeyError) as exc:
-                log.warning("Кэш %s не прочитан: %s", path.name, exc)
-
-    def __len__(self) -> int:
-        return len(self.data)
-
-    def get(self, uid: int) -> Optional[FetchResult]:
-        v = self.data.get(str(uid))
-        if v is None:
-            return None
-        if v == 0:
-            return FetchResult("missing", error="cache")
-        name, d, badges, followers = v
-        return FetchResult("ok", error="cache",
-                           profile=Profile(uid, name, parse_date(d) if d else None, badges or {}, followers=followers))
-
-    def put(self, uid: int, res: FetchResult) -> None:
-        with self.lock:
-            if res.status == "missing":
-                self.data[str(uid)] = 0
-            elif res.status == "ok" and res.profile:
-                p = res.profile
-                self.data[str(uid)] = [p.name, fmt_date(p.aktiv_seit) if p.aktiv_seit else None, p.badges, p.followers]
-
-    def save(self) -> None:
-        with self.lock:
-            payload = json.dumps({"created": self.created, "ids": self.data}, ensure_ascii=False, separators=(",", ":"))
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        tmp.replace(self.path)
-
-
 class Scanner:
     def __init__(self, fetcher, cfg: dict, stop: threading.Event, pause: threading.Event,
                  on_match: Callable[[Match], None], save: Callable[[], None],
-                 cache: Optional[DayCache] = None, on_sample: Callable[[Profile], None] = lambda _p: None):
+                 on_sample: Callable[[Profile], None] = lambda _p: None, share: Callable[[], int] = lambda: 1):
         self.fetcher = fetcher
         self.cfg = cfg
         self.stop = stop
         self.pause = pause
         self.on_match = on_match
         self.save = save
-        self.cache = cache
-        self.on_sample = on_sample   # по одному профилю из пачки — в базу якорей
+        self.on_sample = on_sample   # по одному профилю из пачки — в базу дат
+        self.share = share           # сколько поисков сейчас делят потоки
 
     def _workers(self) -> int:
         wc = getattr(self.fetcher, "worker_count", None)
@@ -1035,31 +988,20 @@ class Scanner:
             time.sleep(0.5)
 
     def _submit(self, ids: list[int], pool: ThreadPoolExecutor) -> list:
-        """Запускает загрузку пачки. ID из кэша дня не запрашиваются."""
-        out = []
-        for uid in ids:
-            cached = self.cache.get(uid) if self.cache is not None else None
-            out.append((uid, cached if cached else pool.submit(self.fetcher.get, uid, self.stop)))
-        return out
+        return [(uid, pool.submit(self.fetcher.get, uid, self.stop)) for uid in ids]
 
     def _collect(self, job: Job, target: Target, batch: list) -> bool:
         """Обрабатывает пачку. Возвращает False, если поиск остановили посреди пачки."""
         results = []
         for uid, item in batch:
-            res = item if isinstance(item, FetchResult) else item.result()
-            results.append((uid, res))
+            results.append((uid, item.result()))
         if any(r.error == "stopped" for _, r in results):
             return False
         sampled = False
         for uid, res in results:
-            from_cache = res.error == "cache"
-            if from_cache:
-                job.cached += 1
-            elif self.cache is not None:
-                self.cache.put(uid, res)
             if res.status == "ok" and res.profile:
                 job.profiles += 1
-                if not from_cache and not sampled and res.profile.aktiv_seit:
+                if not sampled and res.profile.aktiv_seit:
                     self.on_sample(res.profile)
                     sampled = True
                 m = match_profile(target, res.profile, self.cfg["name_fuzzy_threshold"])
@@ -1084,7 +1026,7 @@ class Scanner:
         pending: list = []
         chunks = iter(chunks)
         # сколько ID держать «в работе»: с запасом на зависшие запросы (таймаут прокси, повтор с паузой)
-        depth = max(2 * int(self.cfg["chunk_size"]), self._workers() * 6)
+        depth = max(2 * int(self.cfg["chunk_size"]), self._workers() * 6 // max(1, self.share()))
         try:
             while True:
                 while (len(pending) < 2 or sum(len(i) for i, _ in pending) < depth) and not self.stop.is_set():
@@ -1100,36 +1042,35 @@ class Scanner:
                 if advance_cursor:
                     job.cursor = ids[-1] + 1
                 self.save()
-                if advance_cursor and self.cfg["stop_on_exact_match"] and job.has_exact():
-                    return False
                 self._wait_if_paused()
                 if self.stop.is_set():
                     return False
         finally:
             for _, batch in pending:             # недоделанные пачки отменяем
                 for _, item in batch:
-                    if not isinstance(item, FetchResult):
-                        item.cancel()
-            if self.cache is not None:
-                self.cache.save()
+                    item.cancel()
 
-    def run(self, job: Job) -> None:
+    def run(self, job: Job, pool: Optional[ThreadPoolExecutor] = None) -> None:
+        """Перебирает ВЕСЬ диапазон (не останавливается на первом совпадении).
+        pool — общий пул потоков, если поисков несколько."""
+        if pool is None:
+            with ThreadPoolExecutor(max_workers=self._workers()) as own:
+                return self.run(job, own)
         target = Target.from_dict(job.target)
         size = max(1, int(self.cfg["chunk_size"]))
         if job.cursor is None:
             job.cursor = job.first
         chunks = (list(range(c, min(c + size - 1, job.last) + 1)) for c in range(job.cursor, job.last + 1, size))
-        with ThreadPoolExecutor(max_workers=self._workers()) as pool:
-            if not self._run_chunks(job, target, chunks, pool, advance_cursor=True):
-                return
-            # автоматическая перепроверка ID с ошибками (до 3 кругов, пока их становится меньше)
-            for _ in range(3):
-                before = len(job.error_ids)
-                if not before or self.stop.is_set():
-                    break
-                self.recheck(job, pool)
-                if len(job.error_ids) >= before:
-                    break
+        if not self._run_chunks(job, target, chunks, pool, advance_cursor=True):
+            return
+        # автоматическая перепроверка ID с ошибками (до 3 кругов, пока их становится меньше)
+        for _ in range(3):
+            before = len(job.error_ids)
+            if not before or self.stop.is_set():
+                break
+            self.recheck(job, pool)
+            if len(job.error_ids) >= before:
+                break
 
     def recheck(self, job: Job, pool: Optional[ThreadPoolExecutor] = None) -> int:
         ids = list(job.error_ids)
@@ -1382,15 +1323,17 @@ HELP = f"""🔎 Поиск пользователя Kleinanzeigen
 
 Всё управляется кнопками внизу:
 {M_SEARCH} — ввести имя, выбрать дату и плашки кнопками
-{M_TASKS} — текущий поиск и очередь (пауза, стоп, продолжить)
+{M_TASKS} — идущие поиски: ⏸ пауза и ⏹ стоп для каждого
 {M_STATUS} — прогресс и скорость
-{M_RESULTS} — найденные пользователи
+{M_RESULTS} — что найдено в идущих поисках
 {M_MONITOR} — слежка за новыми объявлениями
 {M_PROXY} — прокси и скорость запросов
 
-📸 В любой момент можно просто прислать СКРИНШОТ профиля —
-бот распознает имя, дату и плашки и предложит начать поиск.
-Можно и текстом одной строкой: Manuela 08.02.2017 top, sehr freundlich"""
+📸 В любой момент можно прислать СКРИНШОТ профиля (можно сразу несколько) —
+каждый станет отдельным поиском, они идут одновременно.
+Поиск перебирает день до конца и сообщает о КАЖДОМ совпадении.
+Уверен, что нашёлся нужный? Жми «✅ Это он» под сообщением — поиск остановится.
+Текстом тоже можно: Manuela 08.02.2017 top, sehr freundlich"""
 
 MONTHS_RU = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"]
 BADGE_PICKER = {   # код категории -> (категория, [(ключ уровня, подпись кнопки)])
@@ -1431,6 +1374,20 @@ def normalize_proxy(text: str) -> Optional[str]:
     return p.rstrip("/") if m else None
 
 
+class SearchRun:
+    """Один поиск: живёт только пока идёт (на диск не сохраняется)."""
+
+    def __init__(self, num: int, target: Target):
+        self.num = num
+        self.target = target
+        self.job = Job(target=target.to_dict())
+        self.stop = threading.Event()
+        self.pause = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.phase = "ждёт очереди"
+        self.confirmed: Optional[int] = None    # ID, который пользователь подтвердил кнопкой «✅ Это он»
+
+
 class Bot:
     def __init__(self, cfg: dict, cfg_path: Optional[Path] = None):
         self.cfg = cfg
@@ -1443,11 +1400,10 @@ class Bot:
         self.anchors = AnchorStore(self.data_dir / "known_accounts.txt", cfg["seed_anchors"], LEGACY_ANCHOR_FILES)
         self.lock = threading.RLock()
         self.state = self._load_state()
-        self.job: Optional[Job] = Job(**self.state["job"]) if self.state.get("job") else None
-        self.job_thread: Optional[threading.Thread] = None
-        self.stop_event = threading.Event()
-        self.pause_event = threading.Event()
-        self.phase = ""
+        self.runs: dict[int, SearchRun] = {}    # идущие и ждущие поиски (только в памяти)
+        self.next_num = 1
+        # общий пул потоков для всех поисков: лимит скорости всё равно общий
+        self.pool = ThreadPoolExecutor(max_workers=64, thread_name_prefix="fetch")
         self.monitor_wakeup = threading.Event()
 
     # ------------------------------------------------------------------
@@ -1460,15 +1416,14 @@ class Bot:
                 st = json.loads(self.state_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 log.error("state.json повреждён (%s), начинаю с чистого", exc)
-        for key, default in (("offset", None), ("watch", {}), ("ui", {}), ("queue", []),
-                             ("history", []), ("job", None)):
+        for key, default in (("offset", None), ("watch", {}), ("ui", {})):
             st.setdefault(key, default)
-        st.pop("pending", None)   # формат старой версии
+        for old in ("pending", "job", "queue", "history"):   # данные прошлых версий не храним
+            st.pop(old, None)
         return st
 
     def save(self) -> None:
         with self.lock:
-            self.state["job"] = asdict(self.job) if self.job else None
             tmp = self.state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(self.state, ensure_ascii=False, indent=1), encoding="utf-8")
             tmp.replace(self.state_path)
@@ -1504,139 +1459,118 @@ class Bot:
             self.tg.send(chat_id, text, buttons)
 
     # ------------------------------------------------------------------
-    # поиск: запуск, очередь, история
+    # поиски: параллельно, у каждого своя пауза/стоп; после окончания — забываем
     # ------------------------------------------------------------------
-    def job_running(self) -> bool:
-        t = self.job_thread
-        # поток поиска, который сам запускает следующий из очереди, «занятым» не считается
-        return t is not None and t.is_alive() and t is not threading.current_thread()
+    def active_runs(self) -> list[SearchRun]:
+        return [r for r in self.runs.values() if r.thread is not None]
 
-    def start_job(self, job: Job) -> None:
-        self.job = job
-        self.stop_event.clear()
-        self.pause_event.clear()
-        self.save()
-        self.job_thread = threading.Thread(target=self._run_job, name="search", daemon=True)
-        self.job_thread.start()
+    def queued_runs(self) -> list[SearchRun]:
+        return [r for r in self.runs.values() if r.thread is None]
+
+    def job_running(self) -> bool:
+        return bool(self.active_runs())
 
     def submit_search(self, target: Target) -> str:
-        """Запускает поиск или ставит в очередь, если уже что-то ищется."""
+        """Запускает поиск сразу (до max_parallel_searches одновременно), остальные ждут."""
         with self.lock:
-            if self.job_running():
-                self.state["queue"].append(target.to_dict())
-                self.save()
-                return f"⏳ Уже идёт поиск — добавил в очередь (№{len(self.state['queue'])}): " \
-                       f"{target.name}, {fmt_date(target.aktiv_seit)}"
-            self.start_job(Job(target=target.to_dict()))
-        return f"🚀 Запускаю поиск: {target.name}, {fmt_date(target.aktiv_seit)}\nХод поиска — в «{M_TASKS}»."
+            run = SearchRun(self.next_num, target)
+            self.next_num += 1
+            self.runs[run.num] = run
+            if len(self.active_runs()) < max(1, int(self.cfg["max_parallel_searches"])):
+                self._start(run)
+                n = len(self.active_runs())
+                tail = f"\nСейчас идёт поисков: {n} — скорость делится между ними." if n > 1 else ""
+                return f"🚀 Поиск #{run.num} запущен: {target.name}, {fmt_date(target.aktiv_seit)}{tail}"
+            return f"⏳ Поиск #{run.num} ждёт: уже идёт {len(self.active_runs())} поисков " \
+                   f"(лимит {self.cfg['max_parallel_searches']}). Начнётся сам, когда один закончится."
 
-    def _start_next_from_queue(self) -> None:
+    def _start(self, run: SearchRun) -> None:
+        run.phase = "ищу диапазон ID"
+        run.thread = threading.Thread(target=self._run_job, args=(run,), name=f"search-{run.num}", daemon=True)
+        run.thread.start()
+
+    def _start_queued(self) -> None:
         with self.lock:
-            if self.job_running() or not self.state["queue"]:
-                return
-            target = Target.from_dict(self.state["queue"].pop(0))
-            self.start_job(Job(target=target.to_dict()))
-        self.broadcast(f"▶️ Следующий поиск из очереди: {target.name}, {fmt_date(target.aktiv_seit)}")
+            limit = max(1, int(self.cfg["max_parallel_searches"]))
+            started = []
+            for run in self.queued_runs():
+                if len(self.active_runs()) >= limit:
+                    break
+                self._start(run)
+                started.append(run)
+        for run in started:
+            self.broadcast(f"▶️ Поиск #{run.num} начался: {run.target.name}, {fmt_date(run.target.aktiv_seit)}")
 
-    def _archive(self, job: Job) -> None:
-        entry = {"target": job.target, "status": job.status, "first": job.first, "last": job.last,
-                 "checked": job.checked, "total": job.total, "errors": len(job.error_ids),
-                 "matches": job.matches, "started": job.started, "finished": time.time()}
-        with self.lock:
-            hist = [h for h in self.state["history"] if h.get("started") != job.started]
-            self.state["history"] = (hist + [entry])[-30:]
-
-    def make_scanner(self, job: Job) -> Scanner:
-        day = Target.from_dict(job.target).aktiv_seit
-        cache = DayCache(self.data_dir / "days" / f"{day.isoformat()}.json", float(self.cfg["day_cache_days"]))
-        return Scanner(self.fetcher, self.cfg, self.stop_event, self.pause_event, self._on_match, self.save,
-                       cache=cache, on_sample=lambda p: self.anchors.add(p.user_id, p.aktiv_seit))
-
-    def remember_found(self, m: Match) -> None:
-        """Найденный аккаунт: дата → база якорей (ускоряет следующие поиски) и запись в config.json."""
-        if not self.job:
-            return
-        t = Target.from_dict(self.job.target)
-        self.anchors.add(m.user_id, t.aktiv_seit)
-        self.anchors.flush()
-        if not self.cfg.get("save_found_to_config", True):
-            return
-        found = [f for f in self.cfg.get("found_accounts") or [] if f.get("id") != m.user_id]
-        found.append({"id": m.user_id, "name": m.name, "date": fmt_date(t.aktiv_seit), "badges": badges_str(t.badges),
-                      "level": m.level, "url": m.url, "found": time.strftime("%d.%m.%Y %H:%M")})
-        seeds = [x for x in self.cfg.get("seed_anchors") or [] if int(x[0]) != m.user_id]
-        seeds.append([m.user_id, fmt_date(t.aktiv_seit)])
-        self.save_config(found_accounts=found, seed_anchors=seeds)
-
-    def _on_match(self, m: Match) -> None:
+    def _on_match(self, run: SearchRun, m: Match) -> None:
         if m.level == "conflict":
-            log.info("Совпало имя, но не плашки: %s %s", m.user_id, m.notes)
+            log.info("#%s: совпало имя, но не плашки: %s %s", run.num, m.user_id, m.notes)
             return   # покажем в итоговом отчёте
-        try:
-            self.remember_found(m)
-        except Exception:
-            log.exception("Не удалось сохранить найденный аккаунт")
+        self.anchors.add(m.user_id, run.target.aktiv_seit)   # дата найденного — в базу дат
+        self.anchors.flush()
         head = "🎯 НАЙДЕН ПОЛЬЗОВАТЕЛЬ!" if m.level == "exact" else "🤔 Возможное совпадение"
         notes = ("\n" + "\n".join("• " + n for n in m.notes)) if m.notes else ""
-        self.broadcast(f"{head}\n{m.name} (ID {m.user_id})\n{m.url}{notes}",
-                       [[btn("👁 Следить за объявлениями", f"w:add:{m.user_id}")]])
+        job = run.job
+        prog = f"\nПоиск #{run.num} продолжается: проверено {job.checked / job.total * 100:.0f}% " \
+               f"— если это он, останови кнопкой ниже." if job.total else ""
+        self.broadcast(f"{head} (поиск #{run.num})\n{m.name} (ID {m.user_id})\n{m.url}{notes}{prog}",
+                       [[btn(f"✅ Это он — остановить поиск #{run.num}", f"j:ok:{run.num}:{m.user_id}")],
+                        [btn("👁 Следить за объявлениями", f"w:add:{m.user_id}")]])
 
-    def _run_job(self) -> None:
-        job = self.job
-        target = Target.from_dict(job.target)
+    def _run_job(self, run: SearchRun) -> None:
+        job, target = run.job, run.target
         try:
-            if job.first is None:
-                job.status = "locating"
-                self.phase = "ищу диапазон ID"
-                locator = RangeLocator(self.fetcher, self.anchors, self.cfg, self.stop_event,
-                                       progress=lambda s: setattr(self, "phase", "диапазон: " + s))
-                job.first, job.last = locator.locate(target.aktiv_seit)
-                self.save()
-                eta = job.total / self.cfg["requests_per_second"] / 60
-                self.broadcast(f"📍 {target.name}: диапазон для {fmt_date(target.aktiv_seit)} — ID "
-                               f"{job.first:,}–{job.last:,} ({job.total:,} ID, ~{eta:.0f} мин). "
-                               f"Запросов на поиск диапазона: {locator.requests}. Начинаю перебор…")
-            job.status = "scanning"
-            self.phase = "перебор"
-            scanner = self.make_scanner(job)
-            scanner.run(job)
-            job.status = "stopped" if self.stop_event.is_set() else "done"
+            job.status = "locating"
+            locator = RangeLocator(self.fetcher, self.anchors, self.cfg, run.stop,
+                                   progress=lambda s: setattr(run, "phase", "диапазон: " + s))
+            job.first, job.last = locator.locate(target.aktiv_seit)
+            share = max(1, len(self.active_runs()))
+            eta = job.total / max(1.0, getattr(self.fetcher, "total_rps", self.cfg["requests_per_second"])) * share / 60
+            self.broadcast(f"📍 Поиск #{run.num} ({target.name}): {fmt_date(target.aktiv_seit)} — ID "
+                           f"{job.first:,}–{job.last:,} ({job.total:,} ID, ~{eta:.0f} мин). Перебираю до конца, "
+                           f"о каждом совпадении сообщу сразу.")
+            job.status, run.phase = "scanning", "перебор"
+            Scanner(self.fetcher, self.cfg, run.stop, run.pause, lambda m: self._on_match(run, m), lambda: None,
+                    on_sample=lambda p: self.anchors.add(p.user_id, p.aktiv_seit),
+                    share=lambda: max(1, len(self.active_runs()))).run(job, self.pool)
+            job.status = "stopped" if run.stop.is_set() else "done"
         except LocateError as exc:
-            if self.stop_event.is_set():
+            if run.stop.is_set():
                 job.status = "stopped"
             else:
                 job.status, job.message = "failed", str(exc)
-                self.broadcast(f"❌ {target.name}: не удалось найти диапазон: {exc}")
         except Exception as exc:   # не роняем бота
-            log.exception("Ошибка поиска")
+            log.exception("Ошибка поиска #%s", run.num)
             job.status, job.message = "failed", f"{type(exc).__name__}: {str(exc)[:200]}"
-            self.broadcast(f"💥 Ошибка поиска: {job.message}\nПрогресс сохранён — «{M_TASKS}» → ▶️ Продолжить.")
         finally:
             self.anchors.flush()
-            self.phase = ""
-            self._archive(job)
-            self.save()
-        if job.status in ("done", "stopped"):
-            self.broadcast(self.report(job), self._watch_buttons(job.matches))
-            if job.status == "done" and self.cfg["auto_watch_on_match"]:
-                for m in job.matches:
-                    if m["level"] == "exact":
-                        self.add_watch(m["user_id"], m["name"])
-        self._start_next_from_queue()
+            with self.lock:
+                self.runs.pop(run.num, None)     # поиск закончен — забываем
+        self.broadcast(self.report(run), self._watch_buttons(job.matches))
+        if self.cfg["auto_watch_on_match"]:
+            exact = [m for m in job.matches if m["level"] == "exact"]
+            if run.confirmed:
+                name = next((m["name"] for m in job.matches if m["user_id"] == run.confirmed), "")
+                self.add_watch(run.confirmed, name)
+            elif job.status == "done" and len(exact) == 1:
+                self.add_watch(exact[0]["user_id"], exact[0]["name"])
+        self._start_queued()
 
-    def report(self, job: Job) -> str:
-        t = Target.from_dict(job.target)
+    def report(self, run: SearchRun) -> str:
+        job, t = run.job, run.target
         mins = (time.time() - job.started) / 60
-        lines = [("✅ Поиск завершён" if job.status == "done" else "⏹ Поиск остановлен") + f" за {mins:.0f} мин",
-                 f"Цель: {t.name}, {fmt_date(t.aktiv_seit)}, плашки: {badges_str(t.badges)}"]
+        if run.confirmed:
+            head = f"✅ Поиск #{run.num} остановлен: ты подтвердил ID {run.confirmed}"
+        elif job.status == "done":
+            head = f"✅ Поиск #{run.num} завершён"
+        elif job.status == "stopped":
+            head = f"⏹ Поиск #{run.num} остановлен"
+        else:
+            head = f"❌ Поиск #{run.num}: ошибка — {job.message}"
+        lines = [f"{head} ({mins:.0f} мин)", f"Цель: {t.name}, {fmt_date(t.aktiv_seit)}, плашки: {badges_str(t.badges)}"]
         if job.first is not None:
             lines.append(f"Диапазон: {job.first:,}–{job.last:,}; проверено {job.checked:,}/{job.total:,} "
-                         f"(профилей {job.profiles:,}, пустых {job.missing:,}, ошибок {len(job.error_ids)})")
-            if job.cached:
-                lines.append(f"♻️ Из кэша дня (без запросов): {job.cached:,} ID")
+                         f"(профилей {job.profiles:,}, пустых {job.missing:,}, не открылись {len(job.error_ids)})")
         lines += self._matches_lines(job.matches)
-        if job.error_ids and not job.has_exact():
-            lines.append(f"\n⚠️ {len(job.error_ids)} ID не удалось проверить — «{M_TASKS}» → 🔁 Перепроверить")
         return "\n".join(lines)
 
     @staticmethod
@@ -1659,34 +1593,62 @@ class Bot:
                 for m in matches if m["level"] in ("exact", "partial") and str(m["user_id"]) not in self.state["watch"]]
         return rows[:8] or None
 
+    def run_action(self, num: int, action: str, uid: Optional[int] = None) -> str:
+        run = self.runs.get(num)
+        if run is None:
+            return f"Поиск #{num} уже закончен."
+        if action in ("stop", "ok"):
+            if action == "ok" and uid:
+                run.confirmed = uid
+            run.stop.set()
+            run.pause.clear()
+            if run.thread is None:              # ещё не начинался — просто убираем
+                with self.lock:
+                    self.runs.pop(num, None)
+                return f"🗑 Поиск #{num} убран из ожидания."
+            return f"⏹ Останавливаю поиск #{num}…" if action == "stop" else \
+                f"✅ Принято: ID {uid}. Останавливаю поиск #{num}…"
+        if action == "pause":
+            run.pause.set()
+            return f"⏸ Поиск #{num} на паузе."
+        if action == "resume":
+            run.pause.clear()
+            return f"▶️ Поиск #{num} продолжается."
+        return ""
+
+    def all_runs_action(self, action: str) -> None:
+        for num in list(self.runs):
+            self.run_action(num, action)
+
     # ------------------------------------------------------------------
     # экраны: статус, задачи, результаты
     # ------------------------------------------------------------------
+    def _run_line(self, run: SearchRun) -> str:
+        job, t = run.job, run.target
+        if run.thread is None:
+            st = "⏳ ждёт очереди"
+        elif run.pause.is_set():
+            st = "⏸ пауза"
+        elif job.total:
+            st = f"{job.checked / job.total * 100:.0f}% ({job.checked:,}/{job.total:,})"
+        else:
+            st = run.phase
+        found = sum(1 for m in job.matches if m["level"] in ("exact", "partial"))
+        return f"#{run.num} {t.name} / {fmt_date(t.aktiv_seit)} — {st}" + (f", найдено {found}" if found else "")
+
     def status_text(self) -> str:
         parts = ["📊 Статус"]
-        job = self.job
-        if job:
-            t = Target.from_dict(job.target)
-            st = JOB_STATUS_RU.get(job.status, job.status)
-            if self.pause_event.is_set() and self.job_running():
-                st = "⏸ пауза"
-            parts.append(f"Поиск: {t.name} / {fmt_date(t.aktiv_seit)} — {st}")
-            if self.phase:
-                parts.append(f"Этап: {self.phase}")
-            if job.total:
-                pct = job.checked / job.total * 100
-                left = max(0, (job.last or 0) - (job.cursor or job.first or 0) + 1)
-                eta = left / max(1, self.cfg["requests_per_second"]) / 60
-                parts.append(f"Проверено {job.checked:,}/{job.total:,} ({pct:.1f}%)"
-                             + (f", осталось ~{eta:.0f} мин" if self.job_running() else ""))
-                parts.append(f"Профилей {job.profiles:,}, пустых {job.missing:,}, ошибок {len(job.error_ids)}, "
-                             f"совпадений {len(job.matches)}" + (f", из кэша {job.cached:,}" if job.cached else ""))
-            if job.message:
-                parts.append(job.message)
+        active, queued = self.active_runs(), self.queued_runs()
+        if active or queued:
+            parts.append(f"Поисков идёт: {len(active)}, ждут: {len(queued)}")
+            parts += ["  " + self._run_line(r) for r in active + queued]
+            left = sum(max(0, (r.job.last or 0) - (r.job.cursor or r.job.first or 0) + 1)
+                       for r in active if r.job.total and not r.pause.is_set())
+            rps = getattr(self.fetcher, "total_rps", self.cfg["requests_per_second"])
+            if left:
+                parts.append(f"Осталось перебрать {left:,} ID ≈ {left / max(1.0, rps) / 60:.0f} мин на всё")
         else:
-            parts.append("Поиск ещё не запускался.")
-        if self.state["queue"]:
-            parts.append(f"В очереди: {len(self.state['queue'])}")
+            parts.append("Сейчас поисков нет.")
         paused = getattr(self.fetcher, "paused_for", lambda: 0)()
         if paused:
             parts.append(f"⛔ Автопауза из-за блокировки: ещё {paused // 60 + 1} мин")
@@ -1701,7 +1663,7 @@ class Bot:
                      f"{n_proxy or 1} {'прокси' if n_proxy else 'прямое соединение'}), потоков {workers}")
         if lanes and any(lane.pause_until > time.monotonic() for lane in lanes):
             parts += ["  " + x for x in self.fetcher.lanes_info()]
-        parts.append(f"Мониторинг: {len(self.state['watch'])} акк. · якорей в базе: {len(self.anchors):,}")
+        parts.append(f"Мониторинг: {len(self.state['watch'])} акк. · дат в базе: {len(self.anchors):,}")
         return "\n".join(parts)
 
     def screen_status(self, chat_id: str, msg_id: Optional[int] = None) -> None:
@@ -1709,59 +1671,43 @@ class Bot:
                   msg_id)
 
     def screen_tasks(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+        runs = self.active_runs() + self.queued_runs()
         lines = ["📋 Задачи"]
         rows: list = []
-        job = self.job
-        running = self.job_running()
-        if job:
-            t = Target.from_dict(job.target)
-            st = "⏸ пауза" if running and self.pause_event.is_set() else JOB_STATUS_RU.get(job.status, job.status)
-            prog = f" — {job.checked / job.total * 100:.0f}%" if job.total else ""
-            lines.append(f"{'▶️' if running else '•'} {t.name} / {fmt_date(t.aktiv_seit)} — {st}{prog}")
-            if running:
-                rows.append([btn("▶️ Продолжить", "t:resume") if self.pause_event.is_set() else btn("⏸ Пауза", "t:pause"),
-                             btn("⏹ Стоп", "t:stop")])
+        if not runs:
+            lines.append("Сейчас поисков нет. Пришли скриншот или нажми «Поиск по имени».")
+        for run in runs:
+            lines.append(self._run_line(run))
+            if run.thread is None:
+                rows.append([btn(f"🗑 Убрать #{run.num}", f"j:stop:{run.num}")])
             else:
-                unfinished = job.status in ("stopped", "failed", "locating", "scanning") and \
-                    (job.cursor is None or job.last is None or job.cursor <= job.last)
-                if unfinished:
-                    rows.append([btn("▶️ Продолжить поиск", "t:continue")])
-                if job.error_ids:
-                    rows.append([btn(f"🔁 Перепроверить ошибки ({len(job.error_ids)})", "t:recheck")])
-        else:
-            lines.append("Поисков пока не было.")
-        if self.state["queue"]:
-            lines.append("\nОчередь:")
-            for i, q in enumerate(self.state["queue"]):
-                lines.append(f"{i + 1}. {q['name']} / {q['aktiv_seit']}")
-                rows.append([btn(f"🗑 Убрать {i + 1}. {q['name'][:20]}", f"t:del:{i}")])
+                rows.append([btn(f"▶️ #{run.num}", f"j:resume:{run.num}") if run.pause.is_set()
+                             else btn(f"⏸ #{run.num}", f"j:pause:{run.num}"),
+                             btn(f"⏹ Стоп #{run.num}", f"j:stop:{run.num}")])
+        if runs:
+            lines.append("\n⏹ Стоп — поиск завершится сразу, найденное придёт отчётом.")
         rows.append([btn("🔄 Обновить", "t:refresh"), btn(M_SEARCH, "c:new")])
         self.show(chat_id, "\n".join(lines), rows, msg_id)
 
     def screen_results(self, chat_id: str, msg_id: Optional[int] = None) -> None:
-        entries = list(reversed(self.state["history"]))[:10]
-        if self.job and self.job_running():
-            entries.insert(0, {"target": self.job.target, "status": self.job.status, "matches": self.job.matches,
-                               "checked": self.job.checked, "total": self.job.total})
-        if not entries:
-            self.show(chat_id, "🏆 Результатов пока нет — запусти поиск.", [[btn(M_SEARCH, "c:new")]], msg_id)
+        runs = self.active_runs()
+        if not runs:
+            self.show(chat_id, "🏆 Сейчас поисков нет. Результаты закончившихся поисков — в их отчётах в чате.",
+                      [[btn(M_SEARCH, "c:new")]], msg_id)
             return
-        lines = ["🏆 Результаты (последние поиски)"]
-        all_matches = []
-        for e in entries:
-            t = e["target"]
-            st = JOB_STATUS_RU.get(e["status"], e["status"])
-            prog = f", {e['checked']:,}/{e['total']:,}" if e.get("total") else ""
-            lines.append(f"\n📅 {t['aktiv_seit']} · {t['name']} — {st}{prog}")
-            good = [m for m in e["matches"] if m["level"] in ("exact", "partial")]
-            for m in e["matches"]:
+        lines = ["🏆 Найдено в идущих поисках"]
+        rows: list = []
+        for run in runs:
+            lines.append("\n" + self._run_line(run))
+            for m in run.job.matches:
                 icon = {"exact": "🎯", "partial": "🤔", "conflict": "↔️"}[m["level"]]
                 lines.append(f"  {icon} {m['name']} — {PROFILE_URL.format(uid=m['user_id'])}")
-            if not e["matches"]:
-                lines.append("  — совпадений нет")
-            all_matches += good
-        self.show(chat_id, "\n".join(lines), (self._watch_buttons(all_matches) or []) + [[btn("🔄 Обновить", "r:refresh")]],
-                  msg_id)
+                if m["level"] in ("exact", "partial"):
+                    rows.append([btn(f"✅ #{run.num}: это {m['name'][:18]} (ID {m['user_id']})",
+                                     f"j:ok:{run.num}:{m['user_id']}")])
+            if not run.job.matches:
+                lines.append("  — пока совпадений нет")
+        self.show(chat_id, "\n".join(lines), rows[:10] + [[btn("🔄 Обновить", "r:refresh")]], msg_id)
 
     # ------------------------------------------------------------------
     # мастер поиска: имя → дата → плашки → карточка
@@ -2131,12 +2077,10 @@ class Bot:
             self.tg.send(chat_id, "Ввод сброшен.", keyboard=MAIN_KEYBOARD)
         elif cmd == "/status":
             self.screen_status(chat_id)
-        elif cmd in ("/tasks", "/pause", "/resume", "/stop", "/recheck"):
-            action = {"/pause": "pause", "/resume": "resume", "/stop": "stop", "/recheck": "recheck"}.get(cmd)
-            if action == "resume" and not self.job_running():
-                action = "continue"
+        elif cmd in ("/tasks", "/pause", "/resume", "/stop"):
+            action = {"/pause": "pause", "/resume": "resume", "/stop": "stop"}.get(cmd)
             if action:
-                self.task_action(chat_id, action)
+                self.all_runs_action(action)     # команда — для всех поисков сразу
             self.screen_tasks(chat_id)
         elif cmd in ("/results",):
             self.screen_results(chat_id)
@@ -2162,33 +2106,6 @@ class Bot:
                 self.tg.send(chat_id, f"Добавлено: {parts[0]} → {fmt_date(d)} (всего {len(self.anchors):,})")
         else:
             self.tg.send(chat_id, "Не знаю такую команду — пользуйся кнопками меню.", keyboard=MAIN_KEYBOARD)
-
-    def task_action(self, chat_id: str, action: str) -> None:
-        job = self.job
-        if action == "pause" and self.job_running():
-            self.pause_event.set()
-        elif action == "resume" and self.job_running():
-            self.pause_event.clear()
-        elif action == "stop" and self.job_running():
-            self.stop_event.set()
-            self.pause_event.clear()
-            self.tg.send(chat_id, "⏹ Останавливаю… прогресс сохранится, потом можно «▶️ Продолжить поиск».")
-        elif action == "continue" and job and not self.job_running():
-            job.message = ""
-            self.start_job(job)
-        elif action == "recheck" and job and job.error_ids and not self.job_running():
-            self.tg.send(chat_id, f"🔁 Перепроверяю {len(job.error_ids)} ID…")
-            self.stop_event.clear()
-
-            def _run():
-                self.make_scanner(job).recheck(job)
-                self._archive(job)
-                self.save()
-                self.broadcast(self.report(job), self._watch_buttons(job.matches))
-                self._start_next_from_queue()
-
-            self.job_thread = threading.Thread(target=_run, name="recheck", daemon=True)
-            self.job_thread.start()
 
     def handle_callback(self, chat_id: str, data: str, msg_id: int) -> None:
         u = self.ui(chat_id)
@@ -2245,15 +2162,14 @@ class Bot:
             self.badge_picker(chat_id, msg_id)
         # --- задачи / статус / результаты ---
         elif kind == "t":
-            if parts[1] == "del":
-                i = int(parts[2])
-                with self.lock:
-                    if 0 <= i < len(self.state["queue"]):
-                        self.state["queue"].pop(i)
-            elif parts[1] != "refresh":
-                self.task_action(chat_id, parts[1])
-                time.sleep(0.3)   # дать потоку поиска обновить статус
             self.screen_tasks(chat_id, msg_id)
+        elif kind == "j":       # действия с конкретным поиском: j:<действие>:<номер>[:<ID>]
+            uid = int(parts[3]) if len(parts) > 3 else None
+            note = self.run_action(int(parts[2]), parts[1], uid)
+            if note:
+                self.tg.send(chat_id, note)
+            if parts[1] != "ok":
+                self.screen_tasks(chat_id, msg_id)
         elif kind == "s":
             self.screen_status(chat_id, msg_id)
         elif kind == "r":
@@ -2366,11 +2282,6 @@ class Bot:
         for chat_id in self.cfg["allowed_chat_ids"]:
             self.tg.send(chat_id, "🤖 Бот запущен. Меню — кнопками внизу, или пришли скриншот профиля.",
                          keyboard=MAIN_KEYBOARD)
-        if self.job and self.job.status in ("locating", "scanning"):
-            self.broadcast("♻️ Бот перезапущен — продолжаю незаконченный поиск.")
-            self.start_job(self.job)
-        else:
-            self._start_next_from_queue()
         offset = self.state.get("offset")
         while True:
             try:
@@ -2387,7 +2298,7 @@ class Bot:
                     self.save()
             except KeyboardInterrupt:
                 log.info("Остановка…")
-                self.stop_event.set()
+                self.all_runs_action("stop")
                 self.anchors.flush()
                 self.save()
                 return

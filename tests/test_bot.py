@@ -49,6 +49,7 @@ class FakeSite:
         self.special = {}
         self.calls = 0
         self.lock = threading.Lock()
+        self.gate = None          # threading.Event: пока не открыт, запросы «висят» (для тестов параллельности)
 
     def date_of(self, uid):
         if uid < self.start_id or uid >= self.start_id + self.per_day * self.days:
@@ -63,6 +64,10 @@ class FakeSite:
         return [u for u in range(first, first + self.per_day) if self.exists(u)]
 
     def get(self, uid, stop=None):
+        while self.gate is not None and not self.gate.is_set():
+            if stop is not None and stop.is_set():
+                return kb.FetchResult("error", error="stopped")
+            time.sleep(0.005)
         with self.lock:
             self.calls += 1
             fail = self.rnd.random() < self.error_rate
@@ -200,7 +205,7 @@ class TestScanner(unittest.TestCase):
         target = kb.Target("Manuela", d, {"satisfaction": "TOP Zufriedenheit", "friendliness": "Besonders freundlich"})
         site.special[ids[100]] = kb.Profile(ids[100], "Manuela", d, {"satisfaction": "OK Zufriedenheit"})
         site.special[ids[1500]] = kb.Profile(ids[1500], "manuela", d, dict(target.badges), followers=3)
-        job, found = self.run_scan(site, target, dict(CFG, stop_on_exact_match=False))
+        job, found = self.run_scan(site, target)
         levels = {m["user_id"]: m["level"] for m in job.matches}
         self.assertEqual(levels, {ids[100]: "conflict", ids[1500]: "exact"})
         # 10% запросов падает, а у фейка нет встроенных повторов — после 3 кругов перепроверки
@@ -208,15 +213,16 @@ class TestScanner(unittest.TestCase):
         self.assertLessEqual(len(job.error_ids), 3)
         self.assertEqual(job.checked + len(job.error_ids), job.total)
 
-    def test_stop_on_exact(self):
+    def test_scans_to_the_end_and_reports_every_match(self):
         site = FakeSite(error_rate=0)
         d = date(2016, 9, 9)
         ids = site.ids_on(d)
         target = kb.Target("Manuela", d, {})
-        site.special[ids[10]] = kb.Profile(ids[10], "Manuela", d, {})
-        job, _ = self.run_scan(site, target)
-        self.assertTrue(job.has_exact())
-        self.assertLess(job.cursor, job.last, "после точного совпадения перебор должен остановиться")
+        for i in (10, 900, len(ids) - 3):
+            site.special[ids[i]] = kb.Profile(ids[i], "Manuela", d, {})
+        job, found = self.run_scan(site, target)
+        self.assertEqual(job.cursor, job.last + 1, "перебор идёт до конца, а не до первого совпадения")
+        self.assertEqual([m.user_id for m in found], [ids[10], ids[900], ids[-3]], "уведомление о каждом")
 
     def test_partial_when_badge_unknown_or_name_fuzzy(self):
         d = date(2017, 2, 8)
@@ -422,12 +428,13 @@ class TestButtonsUI(unittest.TestCase):
         self.uid = 0
 
     def tearDown(self):
-        self.bot.state["queue"].clear()
-        for _ in range(3):
-            if self.bot.job_thread:
-                self.bot.stop_event.set()
-                self.bot.pause_event.clear()
-                self.bot.job_thread.join(10)
+        if self.site.gate is not None:
+            self.site.gate.set()
+        threads = [r.thread for r in list(self.bot.runs.values()) if r.thread]
+        self.bot.all_runs_action("stop")
+        for t in threads:
+            t.join(10)
+        self.bot.pool.shutdown(wait=True, cancel_futures=True)
         self.tmp.cleanup()
 
     def text(self, t, **extra):
@@ -441,12 +448,18 @@ class TestButtonsUI(unittest.TestCase):
         self.bot.handle_update({"update_id": self.uid, "callback_query": {
             "id": "c", "data": data, "message": {"chat": {"id": int(self.CHAT)}, "message_id": 77}}})
 
-    def wait_job(self):
-        for _ in range(300):
-            if not self.bot.job_running() and not self.bot.state["queue"]:
+    def wait_all(self):
+        for _ in range(600):
+            if not self.bot.runs:
                 return
             time.sleep(0.05)
-        self.fail("поиск не закончился")
+        self.fail("поиски не закончились")
+
+    def start_search(self, text):
+        self.text(text)
+        self.uid += 1                                     # нажатие «Искать» на карточке
+        self.bot.handle_update({"update_id": self.uid, "callback_query": {
+            "id": "c", "data": "c:go", "message": {"chat": {"id": int(self.CHAT)}, "message_id": 77}}})
 
     def test_full_search_by_buttons(self):
         d = date(2016, 9, 9)
@@ -472,20 +485,80 @@ class TestButtonsUI(unittest.TestCase):
         self.assertIn("Arne Schwarzmann", card)
         self.assertIn("09.09.2016", card)
         self.press("Искать")
-        self.assertIn("Запускаю поиск", self.tg.sent[-1])
-        self.wait_job()
+        self.wait_all()
         everything = "\n".join(self.tg.sent)
+        self.assertIn("Поиск #1 запущен", everything)
         self.assertIn("НАЙДЕН ПОЛЬЗОВАТЕЛЬ", everything)
-        self.assertIn(str(ids[600]), everything)
-        self.assertIn(str(ids[600]), self.bot.state["watch"])           # авто-мониторинг
-        self.text(kb.M_RESULTS)
-        self.assertIn("Arne Schwarzmann", self.tg.sent[-1])
+        self.assertIn("Поиск #1 завершён", everything)                   # дошёл до конца
+        self.assertIn(str(ids[600]), self.bot.state["watch"])           # единственное точное → мониторинг
+        self.assertIn((ids[600], d), self.bot.anchors.items())          # дата найденного — в базу дат
+        self.assertEqual(self.bot.runs, {}, "закончившийся поиск забыт")
+        state = json.loads((Path(self.tmp.name) / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(state), {"offset", "watch", "ui"}, "на диске только мониторинг и ввод")
         self.text(kb.M_TASKS)
-        self.assertIn("завершён", self.tg.sent[-1])
-        self.text(kb.M_STATUS)
-        self.assertIn("Проверено", self.tg.sent[-1])
+        self.assertIn("поисков нет", self.tg.sent[-1])
 
-    def test_queue_and_card_edit(self):
+    def test_five_screens_run_in_parallel(self):
+        self.site.gate = threading.Event()                # запросы «висят», поиски точно идут одновременно
+        for i in range(5):
+            self.start_search(f"User{i} 0{i + 1}.10.2016")
+        self.assertEqual(len(self.bot.active_runs()), 5)
+        self.text(kb.M_TASKS)
+        for i in range(1, 6):
+            self.assertIn(f"#{i} User{i - 1}", self.tg.sent[-1])
+        self.start_search("Extra 07.10.2016")             # шестой — сверх лимита 5, ждёт
+        self.assertIn("Поиск #6 ждёт", "\n".join(self.tg.sent))
+        self.assertEqual(len(self.bot.queued_runs()), 1)
+        self.site.gate.set()
+        self.wait_all()
+        reports = [t for t in self.tg.sent if "завершён" in t]
+        self.assertEqual(len(reports), 6, "все шесть поисков дошли до конца")
+
+    def test_stop_button_and_this_is_him(self):
+        d, d2 = date(2016, 10, 1), date(2016, 10, 5)
+        ids, ids2 = self.site.ids_on(d), self.site.ids_on(d2)
+        self.site.special[ids[50]] = kb.Profile(ids[50], "Willi", d, {})
+        hold = threading.Event()                          # «зависание» сайта — поиски точно ещё идут
+        self.addCleanup(hold.set)
+        orig_get = self.site.get
+
+        def slow(uid, stop=None):
+            if threading.current_thread().name.startswith("fetch") and (
+                    ids[50] + 400 < uid <= ids[-1] + 100 or ids2[0] + 100 < uid <= ids2[-1] + 100):
+                while not hold.is_set():
+                    if stop is not None and stop.is_set():
+                        return kb.FetchResult("error", error="stopped")
+                    time.sleep(0.005)
+            return orig_get(uid, stop)
+
+        self.site.get = slow
+
+        def wait_for(cond, what):
+            for _ in range(1000):
+                if cond():
+                    return
+                time.sleep(0.01)
+            self.fail(f"не дождались: {what}")
+
+        self.start_search("Willi 01.10.2016")
+        wait_for(lambda: any("НАЙДЕН" in t for t in self.tg.sent), "уведомление о совпадении")
+        note = next(t for t in self.tg.sent if "НАЙДЕН" in t)
+        self.assertIn("поиск #1", note)
+        self.assertIn("продолжается", note)
+        self.start_search("Privat 05.10.2016")
+        wait_for(lambda: 2 in self.bot.runs and self.bot.runs[2].job.total, "второй поиск начал перебор")
+        self.assertEqual(len(self.bot.active_runs()), 2, "оба поиска идут одновременно")
+        for data in (f"j:ok:1:{ids[50]}", "j:stop:2"):    # «✅ Это он» по #1 и «⏹ Стоп» по #2
+            self.uid += 1
+            self.bot.handle_update({"update_id": self.uid, "callback_query": {
+                "id": "c", "data": data, "message": {"chat": {"id": int(self.CHAT)}, "message_id": 77}}})
+        self.wait_all()
+        everything = "\n".join(self.tg.sent)
+        self.assertIn(f"Поиск #1 остановлен: ты подтвердил ID {ids[50]}", everything)
+        self.assertIn("Поиск #2 остановлен", everything)
+        self.assertIn(str(ids[50]), self.bot.state["watch"])            # подтверждённый → мониторинг
+
+    def test_card_edit_by_buttons(self):
         self.text("Willi 01.10.2016")                     # текстом сразу в карточку
         self.assertIn("Willi", self.tg.sent[-1])
         self.press("📅 Дата")                              # исправить дату кнопками
@@ -493,30 +566,6 @@ class TestButtonsUI(unittest.TestCase):
         self.press("Окт")
         self.press("2")
         self.assertIn("02.10.2016", self.tg.edits[-1])
-        self.press("Искать")
-        self.bot.pause_event.set()                        # пауза: первый поиск точно ещё идёт
-        self.text("Privat 05.10.2016 top")
-        self.press("Искать")
-        self.assertIn("очередь", self.tg.sent[-1])
-        self.text(kb.M_TASKS)
-        self.assertIn("Privat", self.tg.sent[-1])
-        self.press("Продолжить")                          # снять паузу
-        self.wait_job()
-        names = [h["target"]["name"] for h in self.bot.state["history"]]
-        self.assertEqual(names, ["Willi", "Privat"])
-
-    def test_stop_and_continue(self):
-        self.text("Willi 01.10.2016")
-        self.press("Искать")
-        self.bot.pause_event.set()
-        self.text(kb.M_TASKS)
-        self.press("Стоп")
-        self.bot.job_thread.join(10)
-        self.assertEqual(self.bot.job.status, "stopped")
-        self.text(kb.M_TASKS)
-        self.press("Продолжить поиск")
-        self.wait_job()
-        self.assertEqual(self.bot.job.status, "done")
 
     def test_monitor_and_proxy_screens(self):
         self.text(kb.M_MONITOR)
@@ -660,50 +709,25 @@ class TestSpeed(unittest.TestCase):
         self.assertEqual(f.worker_count(), 60)              # 30/с × 1 с × 2
         self.assertEqual(kb.Fetcher(dict(CFG, workers=7)).worker_count(), 7)
 
-    def test_day_cache_makes_repeat_search_free(self):
-        site = FakeSite(error_rate=0)
-        d = date(2016, 9, 9)
-        ids = site.ids_on(d)
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "days" / "2016-09-09.json"
-
-            def scan(name="Nobody"):
-                job = kb.Job(target=kb.Target(name, d).to_dict(), first=ids[0], last=ids[-1])
-                kb.Scanner(site, CFG, threading.Event(), threading.Event(), lambda m: None, lambda: None,
-                           cache=kb.DayCache(path, 30)).run(job)
-                return job
-
-            first = scan()
-            calls = site.calls
-            second = scan()
-            self.assertEqual(site.calls, calls, "повторный поиск по той же дате — без запросов")
-            self.assertEqual(second.cached, second.total)
-            self.assertEqual((second.profiles, second.missing), (first.profiles, first.missing))
-            # другая цель на ту же дату находится прямо по кэшу
-            third = scan(name=f"user{ids[5]}")
-            self.assertTrue(third.has_exact())
-            self.assertEqual(site.calls, calls)
-            # устаревший кэш не используется
-            self.assertEqual(len(kb.DayCache(path, 0)), 0)
-
-    def test_found_account_saved_to_config(self):
+    def test_found_date_goes_only_to_db(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = Path(tmp) / "config.json"
-            cfg_path.write_text('{"telegram_token": "x", "seed_anchors": [[46211501, "24.03.2017"]]}',
-                                encoding="utf-8")
-            bot = kb.Bot(dict(CFG, data_dir=tmp, allowed_chat_ids=["1"], telegram_token="x",
-                              seed_anchors=[[46211501, "24.03.2017"]]), cfg_path)
+            cfg_text = '{"telegram_token": "x", "seed_anchors": [[46211501, "24.03.2017"]]}'
+            cfg_path.write_text(cfg_text, encoding="utf-8")
+            bot = kb.Bot(dict(CFG, data_dir=tmp, allowed_chat_ids=["1"], telegram_token="x"), cfg_path)
             bot.tg = FakeTG()
-            bot.anchors = kb.AnchorStore(Path(tmp) / "a.txt")
-            bot.job = kb.Job(target=kb.Target("Arne", date(2016, 3, 5),
-                                              {"satisfaction": "TOP Zufriedenheit"}).to_dict())
-            bot._on_match(kb.Match("exact", 41000123, "Arne"))
-            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
-            self.assertEqual(saved["found_accounts"][0]["id"], 41000123)
-            self.assertEqual(saved["found_accounts"][0]["date"], "05.03.2016")
-            self.assertIn([41000123, "05.03.2016"], saved["seed_anchors"])
-            self.assertIn([46211501, "24.03.2017"], saved["seed_anchors"])
-            self.assertIn((41000123, date(2016, 3, 5)), bot.anchors.items())
-            bot._on_match(kb.Match("exact", 41000123, "Arne"))          # повтор — без дублей
-            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
-            self.assertEqual(len(saved["found_accounts"]), 1)
+            bot.anchors = kb.AnchorStore(Path(tmp) / "known_accounts.txt")
+            run = kb.SearchRun(1, kb.Target("Arne", date(2016, 3, 5)))
+            bot._on_match(run, kb.Match("exact", 41000123, "Arne"))
+            self.assertIn("41000123;05.03.2016", (Path(tmp) / "known_accounts.txt").read_text(encoding="utf-8"))
+            self.assertEqual(cfg_path.read_text(encoding="utf-8"), cfg_text, "config.json не трогаем")
+            self.assertIn("Это он — остановить поиск #1", str(bot.tg.buttons))
+            bot.pool.shutdown()
+
+    def test_old_config_keys_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "config.json"
+            p.write_text('{"telegram_token": "x", "stop_on_exact_match": true, "found_accounts": [1], '
+                         '"day_cache_days": 30}', encoding="utf-8")
+            cfg = kb.load_config(p)
+            self.assertNotIn("found_accounts", cfg)

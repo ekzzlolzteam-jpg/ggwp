@@ -29,13 +29,10 @@
   ],
   "chunk_size": 200,
   "name_fuzzy_threshold": 0.85,
-  "stop_on_exact_match": true,
   "auto_watch_on_match": true,
-  "save_found_to_config": true,
-  "day_cache_days": 30,
+  "max_parallel_searches": 5,
   "monitor_minutes_min": 10,
   "monitor_minutes_max": 30,
   "tesseract_cmd": "",
-  "data_dir": "data",
-  "found_accounts": []
+  "data_dir": "data"
 }
