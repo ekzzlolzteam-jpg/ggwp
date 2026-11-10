@@ -11,3 +11,5 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+strict_config.json
+data_strict/

@@ -92,14 +92,15 @@ DEFAULT_CONFIG: dict = {
 OBSOLETE_KEYS = ("stop_on_exact_match", "save_found_to_config", "day_cache_days", "found_accounts")
 
 
-def load_config(path: Path) -> dict:
-    cfg = dict(DEFAULT_CONFIG)
+def load_config(path: Path, defaults: Optional[dict] = None) -> dict:
+    defaults = DEFAULT_CONFIG if defaults is None else defaults
+    cfg = dict(defaults)
     if path.exists():
         with path.open(encoding="utf-8") as fh:
             user_cfg = json.load(fh)
         for old in OBSOLETE_KEYS:          # настройки прошлых версий — молча убираем
             user_cfg.pop(old, None)
-        unknown = {k for k in user_cfg if not k.startswith("_")} - set(DEFAULT_CONFIG)
+        unknown = {k for k in user_cfg if not k.startswith("_")} - set(defaults)
         if unknown:
             print(f"⚠️  Неизвестные ключи в {path.name}: {', '.join(sorted(unknown))}")
         cfg.update(user_cfg)
@@ -218,6 +219,7 @@ class Profile:
     followers: Optional[int] = None
     listings: dict = field(default_factory=dict)  # ad_id -> {"title","url","price"}
     page_user_id: Optional[int] = None             # userId, который реально отдала страница
+    response_minutes: Optional[int] = None         # «Antwortet in der Regel innerhalb von …» в минутах
 
     @property
     def url(self) -> str:
@@ -326,6 +328,20 @@ def extract_badges(soup: BeautifulSoup) -> Optional[dict]:
     return res
 
 
+RESPONSE_RE = re.compile(r"Antwortet\s+in\s+der\s+Regel\s+innerhalb\s+(?:von\s+)?(\d+|eine[rsmn]?|wenigen)\s*"
+                         r"(Min|Std|Stunde|Tag)", re.I)
+_RESPONSE_UNIT = {"min": 1, "std": 60, "stunde": 60, "tag": 1440}
+
+
+def parse_response_minutes(text: str) -> Optional[int]:
+    """«Antwortet in der Regel innerhalb von 3 Stunden» -> 180. None, если строки нет."""
+    m = RESPONSE_RE.search(text or "")
+    if not m:
+        return None
+    n = int(m.group(1)) if m.group(1).isdigit() else 1
+    return n * _RESPONSE_UNIT[m.group(2).lower()]
+
+
 def _int_after(pattern: str, text: str) -> Optional[int]:
     m = re.search(pattern, text, re.I)
     return int(m.group(1)) if m else None
@@ -371,6 +387,7 @@ def parse_profile_html(raw_html: str, user_id: int) -> Profile:
     prof.online_ads = _int_after(r"(\d+)\s+Anzeigen?\s+online", src)
     prof.total_ads = _int_after(r"(\d+)\s+gesamt", src)
     prof.followers = _int_after(r"(\d+)\s+Follower", src)
+    prof.response_minutes = parse_response_minutes(src)
     prof.listings = extract_listings(soup)
     return prof
 
@@ -979,6 +996,13 @@ class Scanner:
         self.on_sample = on_sample   # по одному профилю из пачки — в базу дат
         self.share = share           # сколько поисков сейчас делят потоки
 
+    # точки расширения: другой бот (strict_bot.py) подставляет свою цель и своё сравнение
+    def load_target(self, d: dict):
+        return Target.from_dict(d)
+
+    def match(self, target, prof: Profile) -> Optional[Match]:
+        return match_profile(target, prof, self.cfg["name_fuzzy_threshold"])
+
     def _workers(self) -> int:
         wc = getattr(self.fetcher, "worker_count", None)
         return wc() if wc else max(1, int(self.cfg.get("workers") or 6))
@@ -1004,7 +1028,7 @@ class Scanner:
                 if not sampled and res.profile.aktiv_seit:
                     self.on_sample(res.profile)
                     sampled = True
-                m = match_profile(target, res.profile, self.cfg["name_fuzzy_threshold"])
+                m = self.match(target, res.profile)
                 if m and not any(x["user_id"] == uid for x in job.matches):
                     job.matches.append(asdict(m))
                     self.on_match(m)
@@ -1056,7 +1080,7 @@ class Scanner:
         if pool is None:
             with ThreadPoolExecutor(max_workers=self._workers()) as own:
                 return self.run(job, own)
-        target = Target.from_dict(job.target)
+        target = self.load_target(job.target)
         size = max(1, int(self.cfg["chunk_size"]))
         if job.cursor is None:
             job.cursor = job.first
@@ -1080,7 +1104,7 @@ class Scanner:
         pool = pool or ThreadPoolExecutor(max_workers=self._workers())
         try:
             size = max(1, int(self.cfg["chunk_size"]))
-            self._run_chunks(job, Target.from_dict(job.target), (ids[i:i + size] for i in range(0, len(ids), size)),
+            self._run_chunks(job, self.load_target(job.target), (ids[i:i + size] for i in range(0, len(ids), size)),
                              pool, advance_cursor=False)
         finally:
             if own:
@@ -1389,6 +1413,8 @@ class SearchRun:
 
 
 class Bot:
+    scanner_cls = Scanner        # strict_bot.py подставляет свой перебор
+
     def __init__(self, cfg: dict, cfg_path: Optional[Path] = None):
         self.cfg = cfg
         self.cfg_path = cfg_path
@@ -1529,7 +1555,7 @@ class Bot:
                            f"{job.first:,}–{job.last:,} ({job.total:,} ID, ~{eta:.0f} мин). Перебираю до конца, "
                            f"о каждом совпадении сообщу сразу.")
             job.status, run.phase = "scanning", "перебор"
-            Scanner(self.fetcher, self.cfg, run.stop, run.pause, lambda m: self._on_match(run, m), lambda: None,
+            self.scanner_cls(self.fetcher, self.cfg, run.stop, run.pause, lambda m: self._on_match(run, m), lambda: None,
                     on_sample=lambda p: self.anchors.add(p.user_id, p.aktiv_seit),
                     share=lambda: max(1, len(self.active_runs()))).run(job, self.pool)
             job.status = "stopped" if run.stop.is_set() else "done"
