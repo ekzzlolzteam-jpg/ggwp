@@ -39,11 +39,10 @@
 pip install -r requirements.txt
 ```
 
-```bash
-cp config.example.json config.json
-```
+При первом запуске `python kleinanzeigen_bot.py` скрипт сам спросит токен бота, chat_id и прокси
+и создаст `config.json`. Повторить настройку: `python kleinanzeigen_bot.py --setup`.
 
-В `config.json` впиши `telegram_token` (от @BotFather) и `allowed_chat_ids` (свой chat_id —
+Вручную: скопируй `config.example.json` в `config.json` и впиши `telegram_token` (от @BotFather) и `allowed_chat_ids` (свой chat_id —
 если оставить список пустым, бот сам пришлёт твой chat_id в ответ на любое сообщение).
 Прокси — в `proxy_url` (в кавычках!), например `"socks5://user:pass@host:port"`.
 Токен и прокси можно задать и переменными окружения `KA_TELEGRAM_TOKEN`, `KA_PROXY_URL`.
