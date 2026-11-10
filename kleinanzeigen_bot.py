@@ -2491,6 +2491,12 @@ def run_check() -> int:
 
 
 def main() -> None:
+    # Windows: консоль/перенаправление в файл в cp866/cp1251 не умеет эмодзи — не падаем, а заменяем
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     if "--check" in sys.argv:
         sys.exit(run_check())
     if "--selftest" in sys.argv:
