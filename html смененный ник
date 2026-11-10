@@ -1,0 +1,3076 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+        
+    
+    
+
+
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Alle Anzeigen von Privat | Kleinanzeigen</title>
+    
+
+
+
+
+<link rel="icon" href="/favicon.ico" sizes="32x32" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/manifest.webmanifest" />
+
+
+
+
+
+    <meta name="viewport" content="width=device-width"/>
+
+    <script type="text/javascript">window.pageType = 'SellerProfile';</script>
+    
+    
+        <script>
+          if (typeof window.__REACT_DEVTOOLS_GLOBAL_HOOK__ === 'object') {
+            __REACT_DEVTOOLS_GLOBAL_HOOK__.inject = function () {
+            };
+          }
+        </script>
+    
+
+    
+
+<script>
+    window.__KA_EXPERIMENTS__ = {"prpl-1143-price_reco-1st_iteration": "a", "band-12197_onyx_new_v5_checkout_enabled": "a", "katpf-1525_hybrid-mode": "a", "ekpay-8609_web-offer-remove-prices": "a", "ekmo-985_autos_multi_select": "a", "bln-29667-onsite_bundles": "a", "biphone-15014_onyx_offer_without_bpf_shipping": "a", "biphone-13107_rating_ui_ab_test": "a", "biphone-14822_onyx_buy_now_button": "a", "flpro-1625_my_ads_all_commercial": "a", "biphone-14084_ai_mode_chat": "a", "prog-36_returning_user_ad_posting_banner": "a", "band-13433_vip_trx_buttons_bottom_bar": "a", "bln-24924-feed-cards": "a", "klue-1424-filter-collapse-and-sorting": "a", "prpl-831_postad_extraction": "astro", "band-11490_new_interaction_rating": "b", "bln-29777-astro-watchlist": "b", "biphone-13319_pudo": "b", "kblk-343_category_selection": "b", "band-12266_diamond_confirm_item_received_type": "b", "biphone-13800-kill-individual-shipping": "b", "katpf-876_web-verification": "b", "kare-3566_re_location_precision_web": "b", "biphone-14254_onyx_price_only_offer_flow": "b", "band-12446_onyx_make_offer_button_text_change": "b", "biphone-14084_ai_mode_chat_v2": "b", "biphone-14544_ab_test_offer_flow": "b", "bln-29975-multihomes-desktop": "b", "ekmo-1192_similar_ads_watchlist": "b", "klue-1035-vip-extraction": "b", "prpl-1067-my_ads_migration_fe_parent": "b", "biphone-14189_vip_offer_button": "b", "bln-29915-astro-follower-network": "b", "orng-771_radio-badges": "b", "band-12184_onyx_price_only_offer_flow": "b", "prog-34_new_user_ad_posting_nudge": "b", "ylw-82_new_interactions": "b", "bln-28798_private_bundles": "c", "kare-4279_agent_ratings": "c", "kare-4015_re_map_web": "c", "prpl-771_gemini_poc": "d", "ekpay-8036_web_change_shipping_label_flow": "on", "ekpay-7649_trx_web_paypal_logo": "on", "kare-2687_extended_contact_form": "on", "ekpay-6861_trx_web_klarna_logo": "on", "ekpay-6929_kill_individual_shipping": "on", "ekpay-6767_trx_v5_checkout_enabled": "on", "rpt-1128_automatische_antworten": "on", "turmac_draft-generation-enabled": "on"};
+    
+    window.__KAMELEOON_SERVER_EXPERIMENTS__ = window.__KA_EXPERIMENTS__;
+    window.__KAMELEOON_VISITOR_CODE__ = "jioexojgmcgju8r8";
+    window.__KA_KAMELEOON_CONSENT_GIVEN__ = false;
+</script>
+
+<script>
+    
+    try {
+        window.kameleoonIframeUrl = "https://www.kleinanzeigen.de/bffstatic/ka-kameleoon/ka-kameleoon-iframe.html";
+        window.kameleoonLightIframe = false;
+        const kameleoonIframeOriginElement = document.createElement("a");
+        kameleoonIframeOriginElement.href = kameleoonIframeUrl;
+        window.kameleoonIframeOrigin =
+            kameleoonIframeOriginElement.origin ||
+            (kameleoonIframeOriginElement.protocol + "//" + kameleoonIframeOriginElement.hostname);
+        if (location.href.indexOf(window.kameleoonIframeOrigin) !== 0) {
+            window.kameleoonLightIframe = true;
+            const kameleoonProcessMessageEvent = function(event) {
+                if (window.kameleoonIframeOrigin === event.origin && event.data.slice && event.data.slice(0,9) === "Kameleoon") {
+                    window.removeEventListener("message", kameleoonProcessMessageEvent);
+                    window.kameleoonExternalIFrameLoaded = true;
+                    if (window.Kameleoon) {
+                        Kameleoon.Utils.runProtectedScript(event.data);
+                        Kameleoon.Analyst.load();
+                    } else {
+                        window.kameleoonExternalIFrameLoadedData = event.data;
+                    }
+                }
+            };
+            if (window.addEventListener) {
+                window.addEventListener("message", kameleoonProcessMessageEvent, false);
+            }
+            const iframeNode = document.createElement("iframe");
+            iframeNode.src = kameleoonIframeUrl;
+            iframeNode.id = "kameleoonExternalIframe";
+            iframeNode.style =
+                "float: left !important; opacity: 0.0 !important; width: 0px !important; height: 0px !important;";
+            document.head.appendChild(iframeNode);
+        }
+        /* eslint-enable eqeqeq, func-style */
+
+        window.kameleoonQueue = window.kameleoonQueue || [];
+        if (window.__KA_KAMELEOON_CONSENT_GIVEN__) {
+            window.kameleoonQueue.push(function () {
+                window.Kameleoon.API.Core.enableLegalConsent();
+            });
+        } else {
+            window.kameleoonQueue.push(function () {
+                window.Kameleoon.API.Core.disableLegalConsent();
+            });
+        }
+    } catch(_) {
+    }
+</script>
+
+<script src="https://n1ux7flhug.kameleoon.io/engine.js" async fetchpriority="high"></script>
+
+
+    
+    <script type="text/javascript"
+            src="https://static.kleinanzeigen.de/static/js/belen/tracking/adblock-detection/advertising.o6vsfdxitnq.js"></script>
+    <script type="text/javascript"
+            src="https://static.kleinanzeigen.de/static/js/belen/tracking/adblock-detection/ads.o6vsfdxitnq.js"></script>
+    <script type="text/javascript"
+            src="https://static.kleinanzeigen.de/static/js/belen/tracking/adblock-detection/prebid.o6vsfdxitnq.js"></script>
+    <script type="text/javascript"
+            src="https://static.kleinanzeigen.de/static/js/belen/tracking/adblock-detection/advertising-detection.o6vsfdxitnq.js"></script>
+
+    
+
+    
+
+    
+        <meta name="description" content="Hier findest du alle Anzeigen von Privat"/>
+    
+
+    
+
+    
+    
+
+    
+
+    
+
+    
+    
+
+    
+    
+
+    
+        <meta name="_csrf" content="0705539e-45d4-4cbc-a360-4b4a903de857"/>
+        <meta name="_csrf_header" content="X-CSRF-TOKEN"/>
+    
+
+    
+    
+        
+        
+            <meta name="robots" content="noindex, follow"/>
+        
+    
+
+    
+    
+<script>
+    (function(w,d,t,r,u)
+    {
+        var f,n,i;
+        w[u]=w[u]||[],f=function()
+        {
+            var o={ti:"97000112"};
+            o.q=w[u],w[u]=new UET(o),w[u].push("pageLoad")
+        },
+            n=d.createElement(t),n.setAttribute("data-src",r),n.setAttribute("data-consent-interpretation-flag","microsoftAdvertisingAllowed"),n.async=1,n.onload=n.onreadystatechange=function()
+        {
+            var s=this.readyState;
+            s&&s!=="loaded"&&s!=="complete"||(f(),n.onload=n.onreadystatechange=null)
+        },
+            i=d.getElementsByTagName(t)[0],i.parentNode.insertBefore(n,i)
+    })
+    (window,document,"script","//bat.bing.com/bat.js","uetq");
+</script>
+
+
+    
+    <link rel="search" type="application/opensearchdescription+xml" title="Kleinanzeigen"
+          href="https://static.kleinanzeigen.de/static/xml/opensearch.xml"/>
+
+    
+    <meta name="p:domain_verify" content="8866d17f454742906fd2881a9bc207a0"/>
+
+    
+    <meta property="fb:app_id" content="129026183788759"/>
+    <meta property="fb:page_id" content="118074381563675"/>
+    <meta property="og:site_name" content="Kleinanzeigen"/>
+    <meta property="og:country-name" content="Germany"/>
+
+    
+        
+        
+            
+                
+                
+                    <meta property="og:image"
+                          content="https://static.kleinanzeigen.de/static/img/common/logo/logo-kleinanzeigen-og-vertical.png"/>
+                
+            
+        
+    
+
+    
+        
+        
+            <meta property="og:type" content="website"/>
+        
+    
+
+    
+        
+        
+            <meta property="og:description" content="Hier findest du alle Anzeigen von Privat"/>
+        
+    
+
+    
+        
+            <meta property="og:title" content="Alle Anzeigen von Privat | Kleinanzeigen"/>
+        
+        
+    
+
+    
+    
+    
+    
+    
+
+    
+    <meta name="msvalidate.01" content="FB821594C9F8B6D5BA9D0847E8838D8A"/>
+
+    
+    <meta name="google-site-verification" content="mKHxIfCqo8NfW85vQla0XDNT2FPIEt85-o_DsUrrMpA"/>
+    <meta name="google-adsense-account" content="sites-4137444386846037">
+
+    
+    <meta name="facebook-domain-verification" content="9bi0liwrnhj2yqnr230z9any02w2fk"/>
+
+    <link rel="stylesheet" type="text/css" href="https://static.kleinanzeigen.de/static/css/all.134kkdaj17wpl.css"/>
+
+    <link rel="stylesheet" type="text/css" href="https://www.kleinanzeigen.de/liberty/liberty-js-cp/liberty.css"/>
+
+    
+    <script type="text/javascript"
+            src="https://static.kleinanzeigen.de/static/js/belen/tracking/GoogleAnalyticsQueueInitializer.1jos5abfv3uzf.js">
+    </script>
+
+    
+    <script type="text/javascript" data-src="https://www.google-analytics.com/analytics.js"
+            data-consent-interpretation-flag="googleAnalyticsAllowed" async="async"></script>
+
+    
+    <script type="module" src="https://www.kleinanzeigen.de/gdpr/gdpr-consent-management-platform/es/tcfApiStub.min.js"></script>
+
+    
+
+<script>
+    window.dataLayer = window.dataLayer || [];
+    
+    
+</script>
+<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start': new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0], j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src= 'https://server.sgtm-legacy.kleinanzeigen.de/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f); })(window,document,'script','dataLayer','GTM-WHRTL83');</script>
+
+
+    
+    <script>
+        (rtbhEvents = window.rtbhEvents || []).push(
+            {
+                eventType: 'custom',
+                name: 'commercial',
+                value: 'false' // true if user is commercial user
+            }, {
+                eventType: 'uid',
+                id: 'unknown' }); // anonymized user id or unknown
+    </script>
+    
+
+    
+    <script type="text/plain" data-consent-interpretation-flag="facebookAllowed">
+        !function(f,b,e,v,n,t,s)
+        {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+            n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+            if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+            n.queue=[];t=b.createElement(e);t.async=!0;
+            t.src=v;s=b.getElementsByTagName(e)[0];
+            s.parentNode.insertBefore(t,s)}(window,document,'script',
+            'https://connect.facebook.net/en_US/fbevents.js');
+        fbq('init', '1418401095075716');
+        fbq('track', 'PageView');
+    </script>
+    
+
+    <script type="application/ld+json">
+        {
+            "@context": "https://schema.org",
+            "@type": "WebSite",
+            "name": "Kleinanzeigen",
+            "url": "https://www.kleinanzeigen.de"
+        }
+    </script>
+
+    
+    <script type="text/plain" data-consent-interpretation-flag="googleAnalyticsAllowed">
+        (function(h,o,t,j,a,r){
+            h.hj=h.hj||function(){(h.hj.q=h.hj.q||[]).push(arguments)};
+            h._hjSettings={hjid:3779685,hjsv:6};
+            a=o.getElementsByTagName('head')[0];
+            r=o.createElement('script');r.async=1;
+            r.src=t+h._hjSettings.hjid+j+h._hjSettings.hjsv;
+            a.appendChild(r);
+        })(window,document,'https://static.hotjar.com/c/hotjar-','.js?sv=');
+    </script>
+
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+<script type="text/javascript">
+    window.BelenConf = {
+        jsBaseUrl: 'https://static.kleinanzeigen.de/static/js',
+        isBrowse: 'false',
+        isProd: true,
+        initTime: new Date().getTime(),
+        universalAnalyticsOpts: {
+          account: "UA-24356365-9",
+          domain: "kleinanzeigen.de",
+          userId: "",
+          dimensions: {"page_type":"ResultsSeller","l1_category_id":"","l2_category_id":"","l1_location_id":"","l2_location_id":"","l3_location_id":"","l4_location_id":"","selected_category_id":"","selected_category_name":"","selected_location_id":"","selected_location_name":"","dimension15":"de_DE","dimension25":"","dimension39":"private","click_source_domain":"(NULL)","click_campaign_parameters":"","l1_category_name":"","l2_category_name":"","l1_location_name":"","l2_location_name":"","l3_location_name":"","l4_location_name":""},
+          extraDimensions: {dimension73: window.noBlocker === true ? '0' : '1'},
+          sendPageView: true,
+        },
+      tnsPhoneVerificationBundleUrl: 'https://www.kleinanzeigen.de/bffstatic/tns-phone-verification-web/tns-phone-verification-web-bundle',
+      labs: {}
+    };
+
+</script>
+
+
+    
+        
+
+
+
+
+
+
+
+<script type="text/javascript">
+window.LibertyConf = {
+    isLibertyModelAvailable: true,
+    
+        experimentalEnabled: false,
+        marketCode: 'ebayk',
+        activeLabsExperiments: {},
+        hashedUserEmailByAlgorithm: {
+          md5: "",
+          sha256: "",
+        },
+        
+            
+                srpPageNumber: 1,
+            
+            
+        
+        hashedUserId: null,
+        kaCategoryIdL1: null,
+        kaCategoryIdL2: null,
+        luckyNumber: 59135835,
+    
+};
+
+</script>
+
+
+        
+            
+<script type="text/javascript">
+    window.assertive = {
+        debug: false,
+        entityId: "pE5GcbmdizH9q7xnj",
+        analytics: {
+            integrations: {
+                webAnalytics: true,
+            },
+            logUnfilled: true,
+        },
+        hash: {
+            generator: 'list',
+            values: 2,
+            list: ['control', 'experiment'],
+            key: 'control',
+        },
+    };
+</script>
+<script
+    type="text/javascript"
+    data-src="https://pe5gcbmdizh9q7xnj.ay.delivery/client-v2.js"
+    data-consent-interpretation-flag="assertiveYieldAllowed"
+    async
+></script>
+
+        
+        
+        
+<script
+    type="text/plain"
+    data-consent-interpretation-flag="liveRampAllowed"
+>
+    //'envelopeMoudleReady'event-Handler ensures the library is ready to receive the config
+    window.addEventListener("envelopeModuleReady", function () {
+      if (
+        !window.LibertyConf?.hashedUserEmailByAlgorithm?.md5 ||
+        !window.LibertyConf?.hashedUserEmailByAlgorithm.sha256
+      ) {
+        return;
+      }
+
+      atsenvelopemodule.setAdditionalData({
+        type: "emailHashes",
+        id: [
+          window.LibertyConf.hashedUserEmailByAlgorithm.md5,
+          window.LibertyConf.hashedUserEmailByAlgorithm.sha256,
+        ],
+      });
+    });
+</script>
+<script
+    type="text/javascript"
+    data-src="https://ats-wrapper.privacymanager.io/ats-modules/edd2ad8f-34e0-4ee5-bff7-d8043242650a/ats.js"
+    data-consent-interpretation-flag="liveRampAllowed"
+    async="async"
+></script>
+
+        
+            <!-- required by liberty -->
+<!-- pbjs queue is initialized by liberty.js -->
+<script type="text/javascript" src="https://www.kleinanzeigen.de/liberty/liberty-js-cp/prebid/prebid.js" async></script>
+
+        
+        
+            
+
+
+
+<script type="text/javascript" data-src="https://securepubads.g.doubleclick.net/tag/js/gpt.js" data-consent-interpretation-flag="googleAdvertisingFeaturesAllowed" async></script>
+
+        
+        
+<script>
+    function queue() {
+        window._googCsa.q = window._googCsa.q || [];
+        window._googCsa.q.push(arguments);
+    }
+    window._googCsa = window._googCsa || queue;
+    window._googCsa.t = 1 * new Date();
+</script>
+<script type="text/javascript" data-src="https://www.google.com/adsense/search/ads.js" data-consent-interpretation-flag="googleAdvertisingFeaturesAllowed" async></script>
+
+
+
+        
+
+<script type="text/javascript" data-src="https://static.criteo.net/js/ld/publishertag.js" data-consent-interpretation-flag="criteoAllowed" async></script>
+
+
+
+        <script type="text/javascript" async data-src="https://cdn.confiant-integrations.net/UnRkNzNyelV4bG5Pb3NNQnBnS25uTlJJelZnPQ/gpt_and_prebid/config.js" data-consent-interpretation-flag="confiantAllowed"></script>
+
+        
+            
+
+<script type="text/javascript" data-src="https://c.amazon-adsystem.com/aax2/apstag.js" data-consent-interpretation-flag="amazonAdvertisingAllowed" async></script>
+
+        
+        <script type="text/javascript" src="https://www.kleinanzeigen.de/liberty/liberty-js-cp/liberty.min.js" async></script>
+
+    
+
+    
+        
+
+            <script type="text/javascript" src="https://static.kleinanzeigen.de/static/js/top.a38w7fyf4olp.js"></script>
+
+            <script type="text/javascript">
+              window.belenScripts = [];
+              
+              
+              
+              window.belenScripts.push("https://static.kleinanzeigen.de/static/js/base.wajazxh51ukt.js");
+              
+              
+              
+              window.belenScripts.push("https://static.kleinanzeigen.de/static/js/search-all.17supx5s5zw12.js");
+              
+            </script>
+        
+        
+    
+
+    <script type="text/javascript">
+      var externalScripts = [];
+
+      function handleDomReady() {
+        $(document).ready(function () {
+
+          var enabledAdblocker = window.noBlocker !== true;
+          if (enabledAdblocker) {
+            // We disable all sticky ad slots due to the AAX Acceptable Ads policy for activated adblockers.
+            Belen.Advertiser.Sticky.removeStickiness();
+          }
+
+          
+          // NOTE: LibertyWrapper.init needs to be executed before jsFunctionInitController so that the
+          // global defined LibertyWrapper.libertyInstance is present.
+
+          LibertyWrapper.init({"uuid":"00000000-0000-0000-0000-000000000000","dynamicConditionExpression":"%gdpr_google_advertising_features_allowed% != true || %gdpr_the_adex_allowed% != true || %gdpr_criteo_allowed% != true || %gdpr_facebook_allowed% != true || %gdpr_amazon_advertising_allowed% != true || %gdpr_microsoft_advertising_allowed% != true","platform":"DESKTOP","groupName":"b","groupNameSource":"b","pageDetail":{"uuid":"7f9209db-e2ba-4962-a22b-c8b54012263f","platform":"DESKTOP","pageName":"SOI","pageType":"SOI","pageMode":"DEFAULT","pageLayout":"DEFAULT"},"attributionCode":"desktop_b_soi_0","attributionCodeSource":"desktop_b_soi_0","configOrigin":"DYNAMIC_CONDITION_APPLIED","pageLevelSettings":[{"type":"display_web","settings":{"pageUrl":"%CURRENT_URL%","dfpTargets":"%DFP_TARGETS%","userIdHash":"%USER_ID_HASH%","refreshInterval":20000}},{"type":"display_web_aax","settings":{}}],"slots":[{"positionId":"3","containerId":"liberty-3-soi-result-list-3","positionName":"soi-result-list-3","trackingCode":"18903","advertisers":[{"type":"display_web","adSettingId":"61202a59-78bb-487d-a9e5-1ab0889dc0e3","adSettingName":"display_desktop_feed_w/oBidders","settings":{"code":"/7233/eBay_Kleinanzeigen_X/feed","refreshIntervalEnabled":true,"sizes":["fluid",[1,1],[728,130],[728,250],[300,250],[728,90]]}}],"adblockAdvertisers":[{"type":"display_web_aax","adSettingId":"0818a534-1ab2-4e67-bee4-e1d3701351ad","adSettingName":"Blockthrough_display_desktop_feed_adblock","settings":{"code":"/7233/eBay_Kleinanzeigen_X/feed","dfpTargets":"%DFP_TARGETS%","sizes":["fluid",[1,1],[728,130],[728,250],[300,250],[728,90]]}}]},{"positionId":"10","containerId":"liberty-10-soi-result-list-10","positionName":"soi-result-list-10","trackingCode":"18910","advertisers":[{"type":"display_web","adSettingId":"61202a59-78bb-487d-a9e5-1ab0889dc0e3","adSettingName":"display_desktop_feed_w/oBidders","settings":{"code":"/7233/eBay_Kleinanzeigen_X/feed","refreshIntervalEnabled":true,"sizes":["fluid",[1,1],[728,130],[728,250],[300,250],[728,90]]}}],"adblockAdvertisers":[{"type":"display_web_aax","adSettingId":"0818a534-1ab2-4e67-bee4-e1d3701351ad","adSettingName":"Blockthrough_display_desktop_feed_adblock","settings":{"code":"/7233/eBay_Kleinanzeigen_X/feed","dfpTargets":"%DFP_TARGETS%","sizes":["fluid",[1,1],[728,130],[728,250],[300,250],[728,90]]}}]},{"positionId":"51","containerId":"liberty-51-soi-top-banner","positionName":"soi-top-banner","trackingCode":"18951","advertisers":[{"type":"display_web","adSettingId":"61202a59-78bb-487d-a9e5-1ab0889dc0e3","adSettingName":"display_desktop_feed_w/oBidders","settings":{"code":"/7233/eBay_Kleinanzeigen_X/feed","refreshIntervalEnabled":true,"sizes":["fluid",[1,1],[728,130],[728,250],[300,250],[728,90]]}}],"adblockAdvertisers":[{"type":"display_web_aax","adSettingId":"5550b2b2-4455-4420-8523-83c7a6a68d70","adSettingName":"Blockthrough_display_desktop_atf_top_adblock","settings":{"code":"/7233/eBay_Kleinanzeigen_X/feed","dfpTargets":"%DFP_TARGETS%","sizes":[[1,1],[970,250],[800,250],[970,90],[728,90]]}}]},{"positionId":"52","containerId":"liberty-52-soi-sky-btf-left","positionName":"soi-sky-btf-left","trackingCode":"18952","advertisers":[{"type":"display_web","adSettingId":"88b6a548-9c78-4215-bff0-2646bfc3333f","adSettingName":"display_desktop_btf_left_skyscraper_w/oBidders","settings":{"code":"/7233/eBay_Kleinanzeigen_X/BTF/left","refreshIntervalEnabled":true,"sizes":[[200,600],[160,600]]}}],"adblockAdvertisers":[{"type":"display_web_aax","adSettingId":"c54f33fa-db6b-4839-9df0-f7c734e9f59b","adSettingName":"Blockthrough_display_desktop_btf_sky-left_sky-without-mrec_adblock","settings":{"code":"/7233/eBay_Kleinanzeigen_X/BTF/left","dfpTargets":"%DFP_TARGETS%","sizes":[[120,600],[200,600],[160,600]]}}]},{"positionId":"53","containerId":"liberty-53-soi-sky-atf-right","positionName":"soi-sky-atf-right","trackingCode":"18953","advertisers":[{"type":"display_web","adSettingId":"891dacc3-54ab-4ab0-8102-08230bc3aeb5","adSettingName":"display_desktop_atf_right_skyscraper_w/oBidders","settings":{"code":"/7233/eBay_Kleinanzeigen_X/ATF/right","refreshIntervalEnabled":true,"sizes":[[300,600],[160,600],[120,600]]}}],"adblockAdvertisers":[{"type":"display_web_aax","adSettingId":"d538b66b-6fab-461a-9d0a-c1bcc987f32e","adSettingName":"Blockthrough_display_desktop_atf_sky-right_sky-or-mrec_adblock","settings":{"code":"/7233/eBay_Kleinanzeigen_X/ATF/right","dfpTargets":"%DFP_TARGETS%","sizes":["fluid",[300,250],[120,600],[160,600],[200,600],[300,600]]}}]}],"queries":["iphone","kueche","wohnung"],"iab2CategoryIds":["1010","1000"],"experiments":[{"name":"liberty-intowow-desktop","variant":"C","revenueId":"1","trackingTag":"desktop_1_c","variants":null},{"name":"user-split_percentile-test","variant":"DEFAULT","revenueId":"15","trackingTag":"desktop_15_default","variants":null},{"name":"liberty-experimental-build","variant":"D","revenueId":"10","trackingTag":"desktop_10_d","variants":null},{"name":"LIBERTY_FLOOR_OPTIMIZER_EXP","variant":"DEFAULT","revenueId":"12","trackingTag":"desktop_12_default","variants":null}],"gdprConsentInterpretationFlags":{"gdpr_google_advertising_features_allowed":false,"gdpr_the_adex_allowed":false,"gdpr_criteo_allowed":false,"gdpr_facebook_allowed":false,"gdpr_amazon_advertising_allowed":false,"gdpr_the_trade_desk_euid_allowed":false,"gdpr_microsoft_advertising_allowed":false,"gdpr_advertising_full_consent":false,"gdpr_assertive_yield_allowed":false},"luckyId":"88448194-ef53-4940-86d1-560306c38cef","luckyBucket":91,"slotPlaceholders":[{"name":"soi-result-list-3","subarea":"result-list","subareaSpot":"3","height":179,"width":null},{"name":"soi-result-list-10","subarea":"result-list","subareaSpot":"10","height":179,"width":null},{"name":"soi-top-banner","subarea":"top-banner","subareaSpot":"main","height":170,"width":null},{"name":"soi-sky-btf-left","subarea":"sky","subareaSpot":"btf-left","height":null,"width":null},{"name":"soi-sky-atf-right","subarea":"sky","subareaSpot":"atf-right","height":null,"width":null}],"pageType":"SOI","categoryName":"Alle_Kategorien","consent":{"subscription":false,"fullConsent":false,"storageAllowed":false,"vendors":{"google":false,"googleLimited":false,"amazon":false,"criteo":false,"microsoft":false,"assertiveYield":false,"liveramp":false,"theAdex":false,"facebook":false,"theTradeDeskEuid":false},"cmpVersion":null}}, {"%ENCODED_BIDDER_CUSTOM_PARAMS%":{"pt":"ResultsSeller","ct":"0","page":"soi","cat":"0","tcat":"0","city":"","plz":"","kw":"recaro+g60+sitze+vw+golf+2+gt","lsc":[],"lsk":["recaro g60 sitze vw golf 2 gt","ac schnitzer sportenkrad","ac schnitzer","avm fritz!repeater 1200 ax","fritz!repeater 1200ax","ac schnitzer bmw sportlenkrad"],"region":"None","hn":"kleinanzeigen.de","hu":"","li":"0","user_logged_in":"false","polaris":"off","g_lsk":["recaro g60 sitze vw golf 2 gt","ac schnitzer sportenkrad","ac schnitzer","avm fritz!repeater 1200 ax","fritz!repeater 1200ax","ac schnitzer bmw sportlenkrad"],"ptg":"","labstest":"","user_type":"unknown"},"%USER_ID_HASH%":"","%DFP_TARGETS%":{"pt":"ResultsSeller","ct":"0","page":"soi","cat":"0","tcat":"0","city":"","plz":"","kw":"recaro g60 sitze vw golf 2 gt","lsc":[],"lsk":["recaro g60 sitze vw golf 2 gt","ac schnitzer sportenkrad","ac schnitzer","avm fritz!repeater 1200 ax","fritz!repeater 1200ax","ac schnitzer bmw sportlenkrad"],"region":"None","hn":"kleinanzeigen.de","hu":"","li":"0","user_logged_in":"false","polaris":"off","g_lsk":["recaro g60 sitze vw golf 2 gt","ac schnitzer sportenkrad","ac schnitzer","avm fritz!repeater 1200 ax","fritz!repeater 1200ax","ac schnitzer bmw sportlenkrad"],"ptg":"","labstest":"","user_type":"unknown"},"%BIDDER_CUSTOM_PARAMS%":{"pt":"ResultsSeller","ct":"0","page":"soi","cat":"0","tcat":"0","city":"","plz":"","kw":"recaro g60 sitze vw golf 2 gt","lsc":[],"lsk":["recaro g60 sitze vw golf 2 gt","ac schnitzer sportenkrad","ac schnitzer","avm fritz!repeater 1200 ax","fritz!repeater 1200ax","ac schnitzer bmw sportlenkrad"],"region":"None","hn":"kleinanzeigen.de","hu":"","li":"0","user_logged_in":"false","polaris":"off","g_lsk":["recaro g60 sitze vw golf 2 gt","ac schnitzer sportenkrad","ac schnitzer","avm fritz!repeater 1200 ax","fritz!repeater 1200ax","ac schnitzer bmw sportlenkrad"],"ptg":"","labstest":"","user_type":"unknown"},"%QUERY%":""});
+          
+
+          // Tracking
+          
+          Belen.Tracking.initTrackingData({});
+
+          
+          
+          
+          Belen.TrackingDispatcher.cleanLastEvent();
+          
+          
+
+          Belen.TrackingDispatcher.init();
+          
+
+          // init common view
+          Belen.Common.CommonView.init();
+
+          // init page view
+          
+          try {
+            Belen.Search.PostersAdListView.init({}, true);
+          } catch (error) {
+            RemoteJsLogging.logError(error, "Wrapper.jsFunctionInitController");
+          }
+          
+
+          
+
+          // Tracking scripts and pixels
+          
+
+          Belen.Common.CommonView.initOverlayCookies();
+
+          
+          
+
+          
+          
+
+          try {
+            if (kaBelenSharedComponents) {
+              $(document.body).append('<div id="belen-toast-notification"></div>');
+                kaBelenSharedComponents.render({
+                containerId: 'belen-toast-notification',
+              });
+            }
+          } catch (ignore) {
+          }
+        });
+      }
+
+      // init early page view (before document ready)
+      
+
+      
+
+      
+      
+      LazyLoad.js(window.belenScripts, handleDomReady);
+      
+      
+      
+
+      if (externalScripts != null && externalScripts.length > 0) {
+        try {
+          LazyLoad.js(externalScripts);
+        } catch (err) {
+          window.RemoteJsLogging.logError(err, "desktop: lazy load external scripts");
+        }
+      }
+    </script>
+
+    
+
+    
+    <link rel="stylesheet" type="text/css" href="https://www.kleinanzeigen.de/bffstatic/tns-phone-verification-web/tns-phone-verification-web-bundle.css" />
+    <script async type="application/javascript"
+            src="https://www.kleinanzeigen.de/bffstatic/tns-phone-verification-web/tns-phone-verification-web-bundle.js"></script>
+
+    
+    <script defer type="application/javascript" src="https://www.kleinanzeigen.de/bffstatic/promotion-frontend/promotion-frontend-bundle.js"></script>
+
+    
+    <script type="application/javascript" src="https://www.kleinanzeigen.de/bffstatic/delete-celebration-frontend/delete-celebration-frontend-bundle.js" async></script>
+    <link rel="stylesheet" type="text/css" href="https://www.kleinanzeigen.de/bffstatic/delete-celebration-frontend/delete-celebration-frontend-bundle.css" />
+
+    
+    
+        <script type="module">
+          import { organicAdTrackingFacade } from "https://www.kleinanzeigen.de/bffstatic/oat-module/oat.min.js";
+
+          try {
+            const setupInfo = {
+              platform: "DESKTOP",
+              pageType: window.pageType,
+              srpPageNumber: window.LibertyConf.srpPageNumber,
+              hashedUserId: window.LibertyConf.hashedUserId,
+              luckyNumber: window.LibertyConf.luckyNumber,
+              kaCategoryIdL1: window.LibertyConf.kaCategoryIdL1,
+              kaCategoryIdL2: window.LibertyConf.kaCategoryIdL2,
+            };
+
+            organicAdTrackingFacade.setup(setupInfo);
+          } catch (error) {
+            RemoteJsLogging.logError(error, "Organic Ad Tracking: setup failed.")
+          }
+
+          window.oat = organicAdTrackingFacade;
+        </script>
+    
+
+    <script async data-consent-interpretation-flag="adnamiAllowed" data-src="https://functions.adnami.io/api/macro/adsm.macro.kleinanzeigen.de.js"></script>
+
+</head>
+<body
+        id="pstrads" class="dynamic-font">
+
+
+    
+
+
+
+
+
+
+<a class="skip-link--link "
+   href="#main">
+    <div class="skip-link--content">
+        <span>Zum Inhalt springen</span>
+        <svg viewBox="0 0 24 24" fill="none" data-title="arrowRight" stroke="none"
+             role="img" aria-hidden="true" focusable="false" class="skip-link--icon-medium">
+            <path d="M7 20.6959C7 21.5778 8.04838 22.039 8.69849 21.443L19 12L8.69849 2.55695C8.04838 1.96101 7 2.42219 7 3.30412C7 3.58824 7.11925 3.85931 7.32868 4.05129L15.8392 11.8526C15.9256 11.9318 15.9256 12.0682 15.8392 12.1474L7.32868 19.9487C7.11924 20.1407 7 20.4118 7 20.6959Z"
+                  fill="currentColor"></path>
+        </svg>
+    </div>
+</a>
+
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<header id="site-header">
+    <div id="site-header-top" class="site-header-top">
+        <div class="site-header-top-wrap">
+            <div id="site-logo">
+                <a href="/">
+                    <img src="https://static.kleinanzeigen.de/static/img/common/logo/logo-kleinanzeigen-horizontal.1f2pao1sh7vgo.svg"
+                         alt="Logo Kleinanzeigen"></a>
+            </div>
+            
+            <div class="site-signin-wrapper">
+                
+                
+                <div id="site-signin" class="site-signin">
+                    
+                    
+                        
+                        
+                            
+                            
+                                
+                                    <div class="login-overlay is-hidden">
+                                        <div class="login-overlay--content">
+                                            <span class="headline-big">Hallo!</span>
+                                            <p>Willkommen bei Kleinanzeigen. Melde dich hier an,
+                                                oder erstelle ein neues Konto, damit du:</p>
+                                            <a title="Close (Esc)" type="button"
+                                               class="j-overlay-close overlay-close"></a>
+                                            <ul class="list">
+                                                <li>
+                                                    <i class="icon icon-checkmark-green"></i>
+                                                    <span>Nachrichten senden und empfangen kannst</span>
+                                                </li>
+                                                <li>
+                                                    <i class="icon icon-checkmark-green"></i>
+                                                    <span>Eigene Anzeigen aufgeben kannst</span>
+                                                </li>
+                                                <li>
+                                                    <i class="icon icon-checkmark-green"></i>
+                                                    <span>Für dich interessante Anzeigen siehst</span>
+                                                </li>
+                                            </ul>
+                                            <ul class="login-overlay-buttons">
+                                                <li><a class="button-secondary j-overlay-register"
+                                                       data-gaevent="SellerProfile,UserRegistrationBegin"
+                                                       href="/m-benutzer-anmeldung.html">Registrieren</a>
+                                                </li>
+                                                <li><a class="button j-overlay-login"
+                                                       data-gaevent="SellerProfile,LoginBegin" data-gaevent-direct="true"
+                                                       href="/m-einloggen.html?targetUrl=%2Fs-bestandsliste.html?userId%3D53995642">Einloggen</a>
+                                                </li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                                
+                                <div>
+                                    <ul class="linklist flex-row-vertical-center">
+                                        <li><a class="button-secondary button-small"
+                                               data-gaevent="SellerProfile,UserRegistrationBegin"
+                                               href="/m-benutzer-anmeldung.html">Registrieren</a>
+                                        </li>
+                                        <li>oder</li>
+                                        <li>
+                                            <a class="button button-small"
+                                               data-gaevent="SellerProfile,LoginBegin" data-gaevent-direct="true"
+                                               href="/m-einloggen.html?targetUrl=%2Fs-bestandsliste.html?userId%3D53995642">
+                                                <i class="button-icon button-icon-medium icon-my-interactive"></i><span>Einloggen</span></a>
+                                        </li>
+                                    </ul>
+                                </div>
+                            
+                        
+                    </div>
+                </div>
+                
+            </div>
+        </div>
+    </div>
+
+    <div id="site-searchbar" class="ka-site-header">
+        <div id="ka-site-header--inner" class="ka-site-header--inner">
+            
+                
+                    
+                    <div class="ka-site-header--inner--wrapper">
+                        <form id="site-search-form" class="ka-site-header--inner--form" action="/s-suchanfrage.html" method="get">
+
+                            
+                            <div class="ka-site-header--search">
+                                <i class="icon icon-magnifier-nonessential ka-site-header--icon"
+                                   aria-hidden="true"></i>
+                                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+
+<!-- SuggestionWidget  start -->
+<div id="site-search-query-wrp" class="suggestionbox "
+     data-ajaxurl=""
+     data-algolia-index="ebayk_prod_suggest"
+     data-algolia-app-id="8YS7J0Y0H2"
+     data-algolia-api-key="a29d2bf6a595867b238e885289dddadf"
+     data-algolia-use-proxy="true"
+     data-suggest=''> 
+
+
+            <input type="text" id="site-search-query"
+                   
+                   class="splitfield-input ka-site-header--search--input ka-site-header--input-placeholder is-not-clearable" name="keywords" tabindex="" title=""
+                   placeholder="Was suchst du?"
+                   aria-label="Was suchst du?"
+                   value="recaro g60 sitze vw golf 2 gt"
+                    
+                   
+                   
+                   role="searchbox"
+                   autocomplete="off"
+                   aria-autocomplete="list"
+                   aria-controls="site-search-query-suggestionbox"
+                   aria-describedby="site-search-query-instructions" />
+
+    
+</div>
+
+
+                                <div id="site-search-query-live-region"
+                                     aria-live="polite"
+                                     role="status"
+                                     aria-atomic="true"
+                                     class="sr-only"></div>
+
+                                <div id="site-search-query-instructions" class="sr-only">
+                                    Suchbegriff eingeben. Eingabetaste drücken um zu suchen, oder
+                                    Vorschläge mit
+                                    den Pfeiltasten nach oben/unten durchsuchen und mit Eingabetaste
+                                    auswählen.
+                                </div>
+                            </div>
+                            <div class="ka-site-header--divider"></div>
+                            <div class="ka-site-header--category">
+                                <div id="site-search-ctgry"
+                                     class="ka-site-header--category-selector multiselectbox"
+                                     role="application"
+                                     aria-label="Kategorieauswahl"
+                                     data-ajaxurl="/s-kategorie-baum.html">
+                                    
+                                        
+                                        
+                                            
+                                        
+                                    
+
+                                    <button id="search-category-menu-button"
+                                            type="button"
+                                            class="splitfield-dropdown splitfield-dropdown-nonessential splitfield-input ka-site-header--category-selector--input"
+                                            aria-label="Kategorie auswählen - Alle Kategorien"
+                                            aria-haspopup="true"
+                                            aria-controls="search-category-dropdown"
+                                            aria-expanded="false"
+                                    ><span>Alle Kategorien</span></button>
+
+                                    <input
+                                            id="srch-ctgry-inpt"
+                                            readonly="readonly"
+                                            type="hidden"
+                                            value="Alle Kategorien "/>
+
+                                    <input type="hidden"
+                                           value=""
+                                           name="categoryId"
+                                           id="search-category-value"/>
+                                    <ul id="search-category-dropdown"
+                                        class="dropdown-list multiselectbox-list ka-site-header--inner--form--multiselectbox--list"
+                                        role="menu" tabindex="-1"
+                                        aria-labelledby="search-category-menu-button"
+                                        style="top: 50px;">
+                                        <li class="multiselectbox-option" role="menuitem"
+                                            tabindex="-1"><a
+                                                class="multiselectbox-link"
+                                                data-val="0"><img class="category-dropdown-icon" src="https://static.kleinanzeigen.de/static/img/common/icons/categories/allCategoriesIcon.1dcg880qfw47b.svg" alt="" aria-hidden="true" />Alle Kategorien</a>
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
+                            <div class="ka-site-header--divider"></div>
+
+                            
+                            <div id="site-search-where" class="ka-site-header--location">
+                                <i class="icon icon-pin-nonessential ka-site-header--icon"
+                                   aria-hidden="true"></i>
+                                
+                                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!-- SuggestionWidget  start -->
+<div id="site-search-area-wrp" class="suggestionbox "
+     data-ajaxurl="/s-ort-empfehlungen.json"
+     data-algolia-index=""
+     data-algolia-app-id=""
+     data-algolia-api-key=""
+     data-algolia-use-proxy="true"
+     data-suggest=''> 
+
+
+            <input type="text" id="site-search-area"
+                   
+                   class="splitfield-input ka-site-header--location-input is-not-clearable" name="locationStr" tabindex="" title=""
+                   placeholder="PLZ oder Ort"
+                   aria-label="PLZ oder Ort"
+                   value=""
+                    
+                   
+                   
+                   role="searchbox"
+                   autocomplete="off"
+                   aria-autocomplete="list"
+                   aria-controls="site-search-area-suggestionbox"
+                   aria-describedby="site-search-area-instructions" />
+
+    
+        <input class="j-suggstnbx-key" type="hidden" value="" name="locationId" />
+    
+</div>
+
+
+                                <div id="site-search-area-live-region"
+                                     aria-live="polite"
+                                     role="status"
+                                     aria-atomic="true"
+                                     class="sr-only"></div>
+
+                                <div id="site-search-area-instructions" class="sr-only">
+                                    PLZ oder Ort eingeben. Eingabetaste drücken um zu suchen, oder
+                                    Vorschläge mit
+                                    den Pfeiltasten nach oben/unten durchsuchen und mit Eingabetaste
+                                    auswählen.
+                                </div>
+                            </div>
+                            <div class="ka-site-header--divider"></div>
+
+                            <div id="site-search-distance"
+                                 class="ka-site-header--distance"
+                                 role="application"
+                                 aria-label="Radiusauswahl">
+                                <div class="selectbox ka-site-header--distance-selector">
+                                    
+                                    
+                                        
+                                            
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                        
+                                    
+                                    <button id="site-search-distance-menu-button"
+                                            type="button"
+                                            class="splitfield-dropdown splitfield-dropdown-nonessential splitfield-input ka-site-header--distance-selector-input"
+                                            aria-label="Radius auswählen - Ganzer Ort"
+                                            aria-haspopup="true"
+                                            aria-controls="site-search-distance-list"
+                                            aria-expanded="false"
+                                            aria-describedby="radius-selection-instructions"
+                                    ><span>Ganzer Ort</span></button>
+
+                                    <input id="site-search-distance-value"
+                                           type="hidden" value=""
+                                           name="radius"/>
+
+                                    <div id="radius-selection-instructions" class="sr-only">
+                                        Suche im Umkreis des gewählten Orts oder PLZ.
+                                    </div>
+
+                                    <ul id="site-search-distance-list"
+                                        class="dropdown-list selectbox-list ka-site-header--inner--form--multiselectbox--list"
+                                        role="menu" tabindex="-1"
+                                        aria-labelledby="site-search-distance-menu-button"
+                                        style="width: fit-content;"
+                                    >
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option is-selected"
+    id="selectbox-option-0" data-value="0"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                Ganzer Ort
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-1" data-value="1"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 1 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-2" data-value="2"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 2 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-3" data-value="3"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 3 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-5" data-value="5"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 5 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-10" data-value="10"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 10 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-15" data-value="15"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 15 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-20" data-value="20"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 20 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-30" data-value="30"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 30 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-50" data-value="50"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 50 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-100" data-value="100"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 100 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-150" data-value="150"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 150 km
+                                            
+</li>
+
+                                        
+                                            
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-200" data-value="200"
+    role="menuitem"
+    tabindex="-1"
+    
+    aria-current="false">
+    
+                                                + 200 km
+                                            
+</li>
+
+                                        
+                                    </ul>
+                                </div>
+                            </div>
+                            <button
+                 id="site-search-submit" class="button button-overgreen button-small ka-site-header--submit"  type="submit" >
+            <span>Finden</span>
+            </button>
+    
+                            <input type="hidden" name="sortingField"
+                                   value="RECOMMENDED"
+                                   id="search-sorting-field"/>
+                            <input type="hidden" id="search-adType-field" name="adType"
+                                   value=""/>
+                            <input type="hidden" id="search-posterType-field"
+                                   name="posterType"
+                                   value=""/>
+                            <input type="hidden" id="search-pageNum" name="pageNum"
+                                   value="1"/>
+                            <input type="hidden" id="search-action" name="action"
+                                   value="find"/>
+                            <input type="hidden" name="maxPrice"
+                                   value=""/>
+                            <input type="hidden" name="minPrice"
+                                   value=""/>
+                            <input type="hidden" name="buyNowEnabled"
+                                   value="false"/>
+                            <input type="hidden" name="shippingCarrier"
+                                   value=""/>
+                            <input type="hidden" name="shipping"
+                                   value=""/>
+                            
+                            
+                        </form>
+                    </div>
+                
+                
+            
+
+            
+                <nav id="site-mainnav" class="ka-site-mainnav" aria-label="Hauptnavigation">
+                    <ul id="ka-site-mainnav--list" class="ka-site-mainnav--list">
+                        <li id="ka-site-mainnav--item"
+                            class="ka-site-mainnav--item ">
+                            <a id="site-mainnav-postad"
+                               data-gaevent="SellerProfile,PostAdBegin"
+                               href="/p-anzeige-aufgeben-schritt2.html"
+                               class="ka-site-mainnav--item--link">
+                                <span class="ka-site-mainnav--item--icon--post-ad"></span>
+                                <span class="ka-site-mainnav--item--text">Inserieren</span>
+                            </a>
+                        </li>
+                        <li id="site-mainnav-my"
+                            class="ka-site-mainnav--item ">
+                            <button id="site-mainnav-my-link"
+                                    aria-expanded="false"
+                                    aria-controls="site-header-sub"
+                                    
+                                    class="ka-site-mainnav--item--link">
+                                
+                                    
+                                    
+                                        <span class="ka-site-mainnav--item--icon--my-link"></span>
+                                        <span class="ka-site-mainnav--item--text">Meins</span>
+                                    
+                                
+                            </button>
+                        </li>
+                    </ul>
+                </nav>
+            
+        </div>
+    </div>
+
+    
+        <link rel="stylesheet" type="text/css" href="https://www.kleinanzeigen.de/bffstatic/header-navigation/header-navigation-bundle.css" />
+        <div id="header-navigation" class="ka-site-header-navigation"></div>
+        
+        <nav aria-hidden="true" class="sr-only" inert>
+            <a href="/s-immobilien/c195">Immobilien</a>
+            <a href="/s-mode-beauty/c153">Mode & Beauty</a>
+            <a href="/s-auto-rad-boot/c210">Auto, Rad & Boot</a>
+            <a href="/s-haus-garten/c80">Haus & Garten</a>
+            <a href="/s-jobs/c102">Jobs</a>
+            <a href="/s-multimedia-elektronik/c161">Elektronik</a>
+            <a href="/s-familie-kind-baby/c17">Familie, Kind & Baby</a>
+            <a href="/s-haustiere/c130">Haustiere</a>
+            <a href="/s-freizeit-nachbarschaft/c185">Freizeit, Hobby & Nachbarschaft</a>
+            <a href="/s-musik-film-buecher/c73">Musik, Filme & B&#252;cher</a>
+            <a href="/s-eintrittskarten-tickets/c231">Eintrittskarten & Tickets</a>
+            <a href="/s-dienstleistungen/c297">Dienstleistungen</a>
+            <a href="/s-zu-verschenken-tauschen/c272">Verschenken & Tauschen</a>
+            <a href="/s-unterricht-kurse/c235">Unterricht & Kurse</a>
+            <a href="/s-nachbarschaftshilfe/c400">Nachbarschaftshilfe</a>
+        </nav>
+        <script type="text/javascript" src="https://www.kleinanzeigen.de/bffstatic/header-navigation/header-navigation-bundle.js"></script>
+        <script type="text/javascript">
+            window.headerNavigation.render({
+                containerId: "header-navigation",
+                
+            });
+        </script>
+    
+
+    <section id="site-header-sub" class="is-hidden">
+        
+            
+                
+                
+                    <nav id="site-subnav" class="mainnav-sub" aria-label="Nutzermenü">
+                        <ul>
+                            <li class="mainnav-sub-item">
+                                <a id="site-subnav-myads" class="mainnav-sub-link"
+                                   href="/m-meine-anzeigen.html">Meine Anzeigen</a>
+                            </li>
+
+                            <li class="mainnav-sub-item">
+                                <a id="site-subnav-msgbox" class="mainnav-sub-link"
+                                   href="/m-nachrichten.html">
+                                    Nachrichten
+                                </a>
+                            </li>
+
+                            
+
+                            
+
+                            
+
+                            
+
+                            <li class="mainnav-sub-item">
+                                <a id="site-subnav-settings" class="mainnav-sub-link"
+                                   href="/m-einstellungen.html">
+                                    Einstellungen
+                                </a>
+                            </li>
+                            
+                            
+                        </ul>
+                        <hr>
+                        <div class="mainnav-sub-header">Favoriten</div>
+                        <ul>
+                            <li class="mainnav-sub-item">
+                                <a id="site-subnav-watchlist" class="mainnav-sub-link"
+                                   href="/m-merkliste.html">
+                                    Merkliste
+                                </a>
+                            </li>
+                            <li class="mainnav-sub-item">
+                                <a class="mainnav-sub-link"
+                                   href="/m-meine-nutzer.html">
+                                    Nutzer
+                                </a>
+                            </li>
+                            <li class="mainnav-sub-item">
+                                <a id="site-subnav-sase" class="mainnav-sub-link"
+                                   href="/m-meine-suchen.html">
+                                    Suchaufträge
+                                </a>
+                            </li>
+                        </ul>
+                    </nav>
+                
+            
+        
+    </section>
+</header>
+
+
+
+
+
+    <noscript>
+        <div class="l-page-wrapper l-container-row">
+            <div class="outcomemessage-error">
+                Um diese Seite nutzen zu k&ouml;nnen, m&uuml;ssen Sie in Ihren Browser-Einstellungen
+                JavaScript aktivieren.
+            </div>
+        </div>
+    </noscript>
+
+
+
+
+<div class="sr-only">
+    <div id="aria-assertive-notifications" role="alert" aria-live="assertive" aria-relevant="additions"></div>
+    <div id="aria-polite-notifications" role="status" aria-live="polite" aria-relevant="additions" ></div>
+</div>
+
+
+
+
+            
+            <div class="site-base">
+                <div class="site-base--left-banner">
+                    
+                    
+                        
+                        
+                            <div class="site-base--left-banner--full">
+                                <div id="banner-skyscraper-left" class="sticky-advertisement">
+                                    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+    
+        
+        
+        
+    
+
+    
+
+
+                                </div>
+                            </div>
+                        
+                    
+                </div>
+                <div class="site-base--content">
+                    
+                    <div id="site-content"
+                         class="l-page-wrapper l-container-row  ">
+
+                        
+                            
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+    
+        
+        
+        
+    
+
+    
+
+
+                        
+
+                        
+
+
+<div id="browser-unsupported-warning" class="outcomebox-error" style="display: none">
+    
+    <header>
+        <div>Bitte aktualisiere deinen Browser</div>
+    </header>
+    <div class="outcomebox--body">
+        <div><img src="https://static.kleinanzeigen.de/static/img/common/illustrations/connection-issue.vfwgydoqmp1t.svg"
+                  alt="" width="79" height="79"/></div>
+        <p>Viele Deals wurden auf Kleinanzeigen gemacht, seit dein Browser das Licht der Welt
+            erblickt hat. Um weiterhin alle Funktionen einwandfrei nutzen zu können, solltest du ihn
+            aktualisieren.
+            Wir empfehlen <a href="https://www.google.com/intl/de/chrome/" target="_blank"
+                             rel="nofollow">Google Chrome</a>, <a
+                    href="https://www.mozilla.org/de/firefox/new/" target="_blank" rel="nofollow">Mozilla
+                Firefox</a>,
+            <a href="https://www.microsoft.com/de-de/edge" target="_blank" rel="nofollow">Microsoft
+                Edge</a> oder <a href="https://support.apple.com/de-de/HT204416" target="_blank"
+                                 rel="nofollow">Safari</a>, falls du macOS benutzt.
+        </p>
+    </div>
+</div>
+
+<script type="text/javascript">
+  function supportsClassStaticInitialization() {
+    try {
+      return eval(`
+            class Test {
+                static supported = false;
+                static {
+                    this.supported = true;
+                }
+            }
+            Test.supported;
+        `);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isES2022Supported() {
+    
+    return typeof Object.hasOwn === "function" && typeof Array.prototype.at === "function" && supportsClassStaticInitialization();
+  }
+
+  function isES2023Supported() {
+    
+    return typeof Array.prototype.findLast === "function" &&
+           typeof Array.prototype.findLastIndex === "function" &&
+           typeof Array.prototype.toReversed === "function" &&
+           typeof Array.prototype.toSorted === "function" &&
+           typeof Array.prototype.toSpliced === "function" &&
+           typeof Array.prototype.with === "function";
+  }
+
+
+  function showWarningIfBrowserUnsupported() {
+    try {
+      if (!isES2023Supported()) {
+        document.getElementById("browser-unsupported-warning").style.display = "block"
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  showWarningIfBrowserUnsupported()
+</script>
+
+
+                        
+<script type="text/javascript" data-src="https://static.criteo.net/js/ld/ld.js" data-consent-interpretation-flag="criteoAllowed" async></script>
+
+                        
+<script>(function (w, d, dn, t) {
+    w[dn] = w[dn] || [];
+    w[dn].push({eventType: 'init', value: t, dc: ''});
+    var f = d.getElementsByTagName('script')[0], c = d.createElement('script');
+    c.async = true;
+    c.setAttribute('data-src','https://tags.creativecdn.com/tHYYt3p8vtIXMT9NzRdK.js');
+    c.setAttribute("data-consent-interpretation-flag","rtbHouseAllowed");
+    f.parentNode.insertBefore(c, f);
+})(window, document, 'rtbhEvents', 'tHYYt3p8vtIXMT9NzRdK');</script>
+
+                        <main id="main" tabindex="-1">
+                            <form id="userInventoryForm" action="/s-bestandsliste.html" method="get"><input type="hidden" name="sortingField" value="SORTING_DATE" id="pstrads-sort-field"/>
+        <input type="hidden" id="posterads-pageNum" name="pageNum" value="1"/>
+        <input type="hidden" id="posterrads-userId" name="userId" value="53995642"/>
+    </form><div class="l-splitpage-flex">
+        <div class="l-splitpage-navigation">
+            <section data-followed-user="53995642" class="l-container-row contentbox surface userprofile j-followeduser">
+                    <header class="a-single-margin l-container-row">
+                        <button
+                            aria-haspopup="dialog"
+                            aria-label="Profilinformationen öffnen"
+                            id="j-profile-info-button"
+                            class="userprofile--info icon-button">
+                            <i class="icon icon-info-green-big"></i>
+                        </button>
+                        <span class="user-profile-badge">P</span>
+                                <div id="super-user-clickable-badge" class="userprofile--superuser-badge">
+    </div>
+<h2 class="userprofile--name">
+                                    <span class="sr-only">Profil von</span>
+                                    Privat</h2>
+                            <div id="user-reputation" class="userprofile--reputation">
+    </div>
+
+    <link rel="stylesheet" type="text/css" href="https://www.kleinanzeigen.de/bffstatic/user-reputation/user-reputation-bundle.css"/>
+    <script type="text/javascript" src="https://www.kleinanzeigen.de/bffstatic/user-reputation/user-reputation-bundle.js"></script>
+
+    <script type="text/javascript">
+        async function getUserReputationSummaryFromHost() {
+            try {
+                const userReputationApiUrl = "https://gateway.kleinanzeigen.de/user-reputation-service/public/users/{userId}/reputation-summary";
+                const userId = "53995642";
+                const response = await fetch(
+                    userReputationApiUrl.replace("{userId}", encodeURIComponent(userId))
+                );
+
+                if (!response.ok) {
+                    return null;
+                }
+
+                return response.json();
+            } catch (e) {
+                return null;
+            }
+        }
+
+        getUserReputationSummaryFromHost().then(function(userReputationData) {
+            if (window.userReputation && window.userReputation.render) {
+                window.userReputation.render({
+                    containerId: "user-reputation",
+                    userReputationData: userReputationData
+                });
+            }
+        });
+    </script>
+<div class="profile-userbadges">
+                            <button class="userbadge userbadges-profile-rating key="rating"
+                                    data-badge-level="2"
+                                    data-badge-label-local=""
+                                    data-badge-name="rating"
+                                    data-contact-name="Privat"
+                                    data-is-commercial-viewer="false">
+                                        <span class="userbadge-tag">
+                                                    <i class="icon icon-smallest icon-rating-tag-2"></i>
+                                                    TOP&nbsp;Zufriedenheit</span>
+                                            </button>
+                                <button class="userbadge userbadges-profile-friendliness key="friendliness"
+                                    data-badge-level="0"
+                                    data-badge-label-local=""
+                                    data-badge-name="friendliness"
+                                    data-contact-name="Privat"
+                                    data-is-commercial-viewer="false">
+                                        <span class="userbadge-tag">
+                                                    <i class="icon icon-smallest icon-friendliness-tag"></i>
+                                                    Freundlich</span>
+                                            </button>
+                                <button class="userbadge userbadges-profile-reliability key="reliability"
+                                    data-badge-level="1"
+                                    data-badge-label-local=""
+                                    data-badge-name="reliability"
+                                    data-contact-name="Privat"
+                                    data-is-commercial-viewer="false">
+                                        <span class="userbadge-tag">
+                                                    <i class="icon icon-smallest icon-reliability-tag"></i>
+                                                    Sehr zuverlässig</span>
+                                            </button>
+                                </div>
+                        <div class="userprofile-info">
+                            <div class="userprofile-details">
+                                <i class="icon icon-small icon-meins-small"></i>
+                                <span class="userprofile-details-text">
+                                Privater Nutzer</span>
+                            </div>
+                            <div class="userprofile-details">
+                                <i class="icon icon-small icon-bookmark-small"></i>
+                                <span class="userprofile-details-text">Aktiv seit 07.03.2018</span>
+                            </div>
+                            <div class="userprofile-details">
+                                    <i class="icon icon-small icon-clock-gray-small"></i>
+                                    <span class="userprofile-details-text">Antwortet in der Regel innerhalb von 3 Stunden</span>
+                                </div>
+                            <div class="userprofile-details">
+                                    <i class="icon icon-small icon-followers"></i>
+                                    <span class="userprofile-details-text">8 Follower</span>
+                                </div>
+                            </div>
+
+                        <div class="follow-user">
+                            <a
+                href="/m-einloggen.html?targetUrl=%2Fs-bestandsliste.html%3FuserId%3D53995642%26ff%3Dtrue%26csrf%3D0705539e-45d4-4cbc-a360-4b4a903de857"
+        data-gaevent="ResultsSeller,FollowUserBegin" data-gaevent-direct="true" id="follow-user-button"
+                class="button button-toggle follow-user-button"   title="Folgen" >
+
+            <i class="button-icon button-icon icon-follow-user-green"></i>
+            <span>Folgen</span>
+            </a>
+    </div>
+                    </header>
+                </section>
+            
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+    
+        
+        
+        
+            
+            
+        
+    
+
+    
+        
+            <div
+                id="pstrads-sky-left"
+                class="j-liberty-wrapper "
+            >
+        
+
+        
+        <div
+            data-liberty-position-name="soi-sky-btf-left"
+            
+                data-liberty-parent-selector=".j-liberty-wrapper"
+            
+            class="align-center"
+            
+            tabindex="-1"
+            aria-hidden="true"
+        ></div>
+        
+
+        
+            </div>
+        
+    
+
+</div>
+        <div class="l-container-row l-splitpage-content">
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+    
+        
+        
+        
+            
+            
+        
+    
+
+    
+        
+            <div
+                id="pstrads-atf-728x90"
+                class="j-liberty-wrapper "
+            >
+        
+
+        
+        <div
+            data-liberty-position-name="soi-top-banner"
+            
+                data-liberty-parent-selector=".j-liberty-wrapper"
+            
+            class="l-container-row"
+            style="min-height:170px"
+            tabindex="-1"
+            aria-hidden="true"
+        ></div>
+        
+
+        
+            </div>
+        
+    
+
+<div class="l-container-row contentbox-unpadded no-bg">
+                <div class="a-vertical-padded l-container">
+                    <label id="pstrads-sort-label" class="sr-only" for="pstrads-sort-select-inpt">Sortieren nach</label>
+                    <div id="pstrads-sort" class="l-container align-right srp-header">
+                        
+
+
+
+
+
+
+
+
+
+
+
+<div id="pstrads-sort-select" class="textdropdown">
+    <div id="pstrads-sort-select-inpt" class="textdropdown-input" data-text="" role="combobox"
+         tabindex="0" aria-labelledby="pstrads-sort-label" aria-expanded="false"
+         aria-controls="pstrads-sort-select-list"></div>
+    <input id="pstrads-sort-select-value" type="hidden" value="" name="sortingField" />
+    <ul id="pstrads-sort-select-list" class="textdropdown-options" role="listbox">
+       
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option is-selected"
+    id="selectbox-option-SORTING_DATE" data-value="SORTING_DATE"
+    role="option"
+    
+    
+    >
+    Neueste
+</li>
+
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-PRICE_AMOUNT" data-value="PRICE_AMOUNT"
+    role="option"
+    
+    
+    >
+    Niedrigster Preis
+</li>
+
+
+
+
+
+
+
+
+
+
+
+<li class="selectbox-option "
+    id="selectbox-option-PRICE_AMOUNT_DESC" data-value="PRICE_AMOUNT_DESC"
+    role="option"
+    
+    
+    >
+    Höchster Preis
+</li>
+
+    </ul>
+</div>
+</div>
+                    </div>
+
+                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<ul
+        id="page-searchresults-adtable"
+        class="itemlist-separatedbefore ad-list it3">
+    
+        
+        
+            
+            
+                
+                
+                
+
+                
+                
+                    
+                    
+                    
+                    
+                        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<li class="ad-listitem fully-clickable-card    ">
+    <article class="aditem" data-adid="3567460788" 
+             data-href="/s-anzeige/penthouse-zur-miete/3567460788-203-9668">
+        <div class="aditem-image">
+            
+                
+                    
+                    
+                        <script type="application/ld+json">
+                            {"creditText":"Kleinanzeigen","title":"Penthouse zur Miete","description":"Soho-Style-Dachgeschosswohnung mit Klimaanlage – neu und wunderschön, 2 Zimmer, voll möbliert, mit Terrasse und Aufzug in Berlin-Mitte\nLuxuriöses, neu gebautes, großzügiges und vollständig möbliertes 2-Zimmer-Penthouse mit separater Klimaanlage im...","contentUrl":"https://img.kleinanzeigen.de/api/v1/prod-ads/images/95/95901502-087a-4d15-8228-a5986056601c?rule=$_59.AUTO","representativeOfPage":false,"@context":"https://schema.org","@type":"ImageObject"}
+                        </script>
+                    
+                    
+                    
+                    <a href="/s-anzeige/penthouse-zur-miete/3567460788-203-9668">
+                        <div class="imagebox srpimagebox">
+                            <img
+                                src="https://img.kleinanzeigen.de/api/v1/prod-ads/images/95/95901502-087a-4d15-8228-a5986056601c?rule=$_2.AUTO"
+                                srcset="https://img.kleinanzeigen.de/api/v1/prod-ads/images/95/95901502-087a-4d15-8228-a5986056601c?rule=$_35.AUTO"
+                                alt="Penthouse zur Miete Berlin - Mitte Vorschau"
+                                fetchpriority="high"
+                                loading="eager"
+                                
+                            />
+                            
+                            
+                            
+                                <div class="galleryimage--counter">
+                                    9
+                                </div>
+                            
+                            
+                            
+                        </div>
+                    </a>
+                
+                
+            
+
+            
+
+            
+        </div>
+        <div class="aditem-main">
+            <div class="aditem-main--top">
+                <div class="aditem-main--top--left">
+                    
+                        <i class="icon icon-small icon-pin-gray" aria-hidden="true"></i> 10115 Mitte
+                    
+                    
+                    
+                </div>
+                <div class="aditem-main--top--right">
+                    
+                        <i class="icon icon-small icon-calendar-open" aria-hidden="true"></i>
+                        Heute, 13:17
+                    
+                </div>
+            </div>
+            <div class="aditem-main--middle">
+                <h2 class="text-module-begin">
+                    
+                        
+                        
+                            <a class="ellipsis"
+                               
+                               href="/s-anzeige/penthouse-zur-miete/3567460788-203-9668">Penthouse zur Miete</a>
+                        
+                    
+                </h2>
+                <p class="aditem-main--middle--description">Soho-Style-Dachgeschosswohnung mit Klimaanlage – neu und wunderschön, 2 Zimmer, voll möbliert, mit...</p>
+                
+                    <div class="aditem-main--middle--price-shipping">
+                        <p class="aditem-main--middle--price-shipping--price">
+                            800 €
+                            
+                        </p>
+                    </div>
+                
+            </div>
+            <div class="aditem-main--bottom">
+                
+                <p class="text-module-end">
+                    
+                        <span class="simpletag">
+                            
+                            74 m²
+                        </span>
+                    
+                        <span class="simpletag">
+                            
+                            2 Zi.
+                        </span>
+                    
+                    
+                </p>
+                
+            </div>
+        </div>
+    </article>
+</li>
+
+                    
+                
+
+            
+        
+    
+        
+        
+            
+                
+                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+        
+        
+    
+
+    
+
+    
+        
+
+        
+            <li class="ad-listitem">
+        
+        <div
+            data-liberty-position-name="soi-result-list-3"
+            
+            class="align-center"
+            style="min-height:179px"
+            tabindex="-1"
+            aria-hidden="true"
+        ></div>
+        
+            </li>
+        
+
+        
+    
+
+
+            
+            
+        
+    
+        
+        
+            
+                
+                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+        
+        
+    
+
+    
+
+    
+        
+
+        
+            <li class="ad-listitem">
+        
+        <div
+            data-liberty-position-name="soi-result-list-10"
+            
+            class="align-center"
+            style="min-height:179px"
+            tabindex="-1"
+            aria-hidden="true"
+        ></div>
+        
+            </li>
+        
+
+        
+    
+
+
+            
+            
+        
+    
+</ul>
+
+<script type="text/javascript">
+    document.querySelectorAll('.ref-not-linked').forEach(link => {
+        link.addEventListener('click', e => {
+            e.preventDefault();
+            window.open(link.getAttribute('data-url'), '_self')
+        });
+    });
+
+    document.querySelectorAll('.aditem-scroll').forEach(carousel => {
+        const track = carousel.querySelector('.aditem-scroll--items--track');
+        const items = carousel.querySelectorAll('.related-aditem');
+        const prevBtn = carousel.querySelector('.j-scroll-previous');
+        const nextBtn = carousel.querySelector('.j-scroll-next');
+
+        const itemWidth = 207; // Width of one .related-ad
+        const itemsPerPage = 3;
+        let currentPage = 0;
+        const totalPages = Math.ceil(items.length / itemsPerPage);
+
+        function update() {
+            const offset = currentPage * itemWidth * itemsPerPage;
+            track.style.transform = "translateX(-" + offset + "px)";
+
+            if (prevBtn) {
+                prevBtn.classList.toggle('scroll-disabled', currentPage === 0);
+            }
+            if (nextBtn) {
+                nextBtn.classList.toggle('scroll-disabled', currentPage >= totalPages - 1);
+            }
+        }
+
+        if (prevBtn) {
+            prevBtn.addEventListener('click', () => {
+                if (currentPage > 0) {
+                    currentPage--;
+                    update();
+                }
+            });
+        }
+
+        if (nextBtn) {
+            nextBtn.addEventListener('click', () => {
+                if (currentPage < totalPages - 1) {
+                    currentPage++;
+                    update();
+                }
+            });
+        }
+
+        update();
+    });
+</script>
+</div>
+        </div>
+    </div>
+
+    <div id="userprofile-info" class="modal-dialog mfp-popup-medium mfp-hide userprofile--info--modal">
+        <header>
+            <h2>Profilinformationen</h2>
+        </header>
+        <div class="modal-dialog-content userprofile--info-content">
+            <span>
+                Dies ist das Profil von Privat<br><br>
+                Aktiv seit 07.03.2018</span>
+            <div class="modal-dialog--buttons">
+                <a href="https://themen.kleinanzeigen.de/hilfe/nutzerkonto/userprofile/?device=desktop"
+                   target="_blank" class="button-secondary">Mehr erfahren</a>
+            </div>
+        </div>
+    </div>
+
+    <div id="super-user-modal">
+    </div>
+
+    <link rel="stylesheet" type="text/css" href="https://www.kleinanzeigen.de/bffstatic/superuser/superuser-bundle.css"/>
+    <script type="text/javascript" src="https://www.kleinanzeigen.de/bffstatic/superuser/superuser-bundle.js"></script>
+
+    <script type="text/javascript">
+        async function fetchProfileSuperBadge() {
+            try {
+                if (!window.superuser || !window.superuser.fetchPublicSuperBadge) {
+                    return null;
+                }
+
+                return window.superuser.fetchPublicSuperBadge({
+                    apiUrl: "https://gateway.kleinanzeigen.de",
+                    userId: "53995642"
+                });
+            } catch (e) {
+                return null;
+            }
+        }
+
+        async function fetchVisitorTopTraderStatus() {
+            try {
+                if (!window.superuser || !window.superuser.fetchPrivateTopTraderStatus) {
+                    return null;
+                }
+
+                const visitorUserId = "";
+                if (!visitorUserId) {
+                    return null;
+                }
+
+                const auth = await Belen.Common.Security.getAccessToken();
+                const authToken = auth && auth.token;
+                if (!authToken) {
+                    return null;
+                }
+
+                return window.superuser.fetchPrivateTopTraderStatus({
+                    apiUrl: "https://gateway.kleinanzeigen.de",
+                    userId: visitorUserId,
+                    fetchImpl: function(url, options) {
+                        return fetch(url, Object.assign({}, options, {
+                            headers: Object.assign({}, options && options.headers, { "Authorization": authToken })
+                        }));
+                    }
+                });
+            } catch (e) {
+                return null;
+            }
+        }
+
+        fetchProfileSuperBadge().then(function(superBadge) {
+            if (superBadge &&
+                window.superuser &&
+                window.superuser.renderSuperUserBadge) {
+                window.superuser.renderSuperUserBadge({
+                    containerId: "super-user-clickable-badge",
+                    isClickable: true,
+                    superBadge: superBadge
+                });
+            }
+        });
+
+        fetchVisitorTopTraderStatus().then(function(topTraderStatus) {
+            if (topTraderStatus &&
+                window.superuser &&
+                window.superuser.renderSuperUserModal) {
+                window.superuser.renderSuperUserModal({
+                    containerId: "super-user-modal",
+                    topTraderStatus: topTraderStatus,
+                    username: ""
+                });
+            }
+        });
+    </script>
+
+                        </main>
+                        
+                            <div id="btf-billboard" class="flex-right">
+                                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+    
+        
+        
+        
+    
+
+    
+
+
+                            </div>
+                        
+
+                        
+                    </div>
+
+                    
+                    
+                        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<footer id="site-footer" class="l-page-wrapper align-center">
+    <nav id="site-footer-nav" aria-label="Footer-Navigation">
+        <ul class="flexlist is-top-aligned flex-wrap l-container-row">
+            <li class="flexlist--column l-col">
+                <ul class="list">
+                    <li class="flexlist--header">Kleinanzeigen</li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/ueber-uns/"
+                           data-gaevent="SellerProfile,FooterClick,AboutUs" data-gaevent-direct="true">
+                            Über uns
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/careers/"
+                           data-gaevent="SellerProfile,FooterClick,Careers" data-gaevent-direct="true">
+                            Karriere
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/medien"
+                           data-gaevent="SellerProfile,FooterClick,Press" data-gaevent-direct="true">
+                            Presse
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/magazin/"
+                           data-gaevent="SellerProfile,FooterClick,Magazine" data-gaevent-direct="true">
+                            Kleinanzeigen Magazin
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/engagement/"
+                           data-gaevent="SellerProfile,FooterClick,Engagement" data-gaevent-direct="true">
+                            Engagement
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/mobile-apps/"
+                           data-gaevent="SellerProfile,FooterClick,MobileApps" data-gaevent-direct="true">
+                            Mobile&nbsp;Apps</a>
+                    </li>
+                </ul>
+            <li>
+            <li class="flexlist--column l-col">
+                <ul class="list">
+                    <li class="flexlist--header">Informationen</li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/hilfe/"
+                           data-gaevent="SellerProfile,FooterClick,Help" data-gaevent-direct="true">
+                            Hilfe
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/sicherheitshinweise/"
+                           data-gaevent="SellerProfile,FooterClick,Security">
+                            Tipps für deine Sicherheit
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://hilfe.kleinanzeigen.de/hc/de/requests/new?ticket_form_id=28014864126364&widerruf=true"
+                           data-gaevent="SellerProfile,FooterClick,SecurityVulnerability">
+                            Vertrag Widerrufen
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/sicherheitsluecken/"
+                           data-gaevent="SellerProfile,FooterClick,WithdrawFeature">
+                            Sicherheitslücken melden
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/kinder-und-jugendschutz/"
+                           data-gaevent="SellerProfile,FooterClick,YouthProtection">
+                            Kinder- und Jugendschutz
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/erklaerung-zur-barrierefreiheit/"
+                           data-gaevent="SellerProfile,FooterClick,Accessibility">
+                            Barrierefreiheitserklärung
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/datenschutzerklaerung/"
+                           data-gaevent="SellerProfile,FooterClick,PrivacyPolicy" data-gaevent-direct="true">
+                            Datenschutzerklärung
+                        </a>
+                    </li>
+
+                    <li>
+                        <a class="text-link-subdued" href="/gdpr">
+                            Datenschutzeinstellungen
+                        </a>
+                    </li>
+
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/nutzungsbedingungen/"
+                           data-gaevent="SellerProfile,FooterClick,Terms" data-gaevent-direct="true">
+                            Nutzungsbedingungen
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="/impressum.html"
+                           data-gaevent="SellerProfile,FooterClick,Imprint">
+                            Impressum
+                        </a>
+                    </li>
+                </ul>
+            <li>
+            <li class="flexlist--column l-col">
+                <ul class="list">
+                    <li class="flexlist--header">Für Unternehmen</li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/immobilienprofis/"
+                           data-gaevent="SellerProfile,FooterClick,RealEstate" data-gaevent-direct="true">
+                            Kleinanzeigen Immobilien
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/pro-infopoint/"
+                           data-gaevent="SellerProfile,FooterClick,ProContentHub" data-gaevent-direct="true">
+                            PRO Infopoint
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/mit-pro-umsatz-steigern/"
+                           data-gaevent="SellerProfile,FooterClick,ProInformation" data-gaevent-direct="true">
+                            PRO Pakete für&nbsp;Unternehmen
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://kleinanzeigen.de/advertising"
+                           data-gaevent="SellerProfile,FooterClick,Advertising" data-gaevent-direct="true">
+                            Werben auf Kleinanzeigen
+                        </a>
+                    </li>
+                </ul>
+            <li>
+            <li class="flexlist--column l-col">
+                <ul class="list">
+                    <li class="flexlist--header">Social Media</li>
+                    <li>
+                        <a class="text-link-subdued" href="https://www.facebook.com/Kleinanzeigen/" target="_blank" rel="noopener"
+                           data-gaevent="SellerProfile,FooterClick,Facebook" data-gaevent-direct="true">
+                            Facebook
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://www.youtube.com/@KleinanzeigenWG" target="_blank" rel="noopener"
+                           data-gaevent="SellerProfile,FooterClick,YouTube" data-gaevent-direct="true">
+                            YouTube
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://www.instagram.com/kleinanzeigen_official/" target="_blank" rel="noopener"
+                           data-gaevent="SellerProfile,FooterClick,Instagram" data-gaevent-direct="true">
+                            Instagram
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://www.threads.net/@kleinanzeigen_official?hl=de" target="_blank" rel="noopener"
+                           data-gaevent="SellerProfile,FooterClick,Twitter" data-gaevent-direct="true">
+                            Threads
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://www.pinterest.de/kleinanzeigen/" target="_blank" rel="noopener"
+                           data-gaevent="SellerProfile,FooterClick,Pinterest" data-gaevent-direct="true">
+                            Pinterest
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://www.tiktok.com/@kleinanzeigen" target="_blank" rel="noopener"
+                           data-gaevent="SellerProfile,FooterClick,tiktok" data-gaevent-direct="true">
+                            TikTok
+                        </a>
+                    </li>
+                </ul>
+            <li>
+            <li class="flexlist--column l-col">
+                <ul class="list">
+                    <li class="flexlist--header">Allgemein</li>
+                    
+                        
+                            
+                                
+                                
+                                    <li>
+                                        <a class="text-link-subdued" href="/s-beliebte-suchen.html"
+                                           data-gaevent="SellerProfile,FooterClick,PopularSearches">
+                                            Beliebte&nbsp;Suchen
+                                        </a>
+                                    </li>
+                                
+                            
+                            <li>
+                                <a class="text-link-subdued" href="/s-katalog-orte.html"
+                                   data-gaevent="SellerProfile,FooterClick,BrowseLocations">
+                                    Anzeigen&nbsp;Übersicht
+                                </a>
+                            </li>
+                        
+                        
+                    
+                    <li>
+                        <a class="text-link-subdued" href="/s-unternehmensseiten-verzeichnis.html"
+                           data-gaevent="SellerProfile,FooterClick,LandingPageStoresOverview">
+                            Übersicht&nbsp;der&nbsp;Unternehmensseiten
+                        </a>
+                    </li>
+                    <li>
+                        <a class="text-link-subdued" href="https://themen.kleinanzeigen.de/autobewertung"
+                           data-gaevent="SellerProfile,FooterClick,CarRating" data-gaevent-direct="true">
+                            Autobewertung
+                        </a>
+                    </li>
+                </ul>
+            <li>
+        </ul>
+    </nav>
+
+    <p>
+        <small>
+            Copyright © 2005-2026 Marktplaats B.V. Alle Rechte vorbehalten. Ausgewiesene Marken gehören ihren jeweiligen Eigentümern.
+            <br />
+            Die Kleinanzeigen-Dienste werden betrieben von der kleinanzeigen.de GmbH.
+        </small>
+    </p>
+
+    
+</footer>
+
+                    
+
+                    
+                    
+
+                
+            </div>
+            <div class="site-base--right-banner">
+                
+                
+                    
+                    
+                        <div class="site-base--right-banner--full">
+                            <div id="banner-skyscraper" class="sticky-advertisement">
+                                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+    
+        
+        
+        
+            
+            
+        
+    
+
+    
+        
+
+        
+        <div
+            data-liberty-position-name="soi-sky-atf-right"
+            
+            class="l-container"
+            
+            tabindex="-1"
+            aria-hidden="true"
+        ></div>
+        
+
+        
+    
+
+
+                            </div>
+                        </div>
+                    
+                
+            </div>
+        </div>
+
+        
+        
+
+        
+
+        
+
+
+
+
+
+<script type="text/javascript">
+    /* <![CDATA[ */
+    var google_conversion_id = 1019393085;
+    var google_conversion_label = "9bxiCMPlvwQQveiK5gM";
+    var google_custom_params = window.google_tag_params;
+    var google_remarketing_only = true;
+    /* ]]> */
+</script>
+
+
+<script type="text/javascript" data-src="//www.googleadservices.com/pagead/conversion.js" data-consent-interpretation-flag="googleAdvertisingFeaturesAllowed"></script>
+
+
+
+
+        
+        
+
+        
+        <div id="ka-snackbar-container"></div>
+<link rel="stylesheet" type="text/css" href="https://www.kleinanzeigen.de/bffstatic/ka-belen-shared-components/ka-belen-shared-components-bundle.css" />
+<script src="https://www.kleinanzeigen.de/bffstatic/ka-belen-shared-components/ka-belen-shared-components-bundle.js"></script>
+<script>
+    if (window.kaBelenSharedComponents) {
+        window.kaBelenSharedComponents.render({
+            containerId: "ka-snackbar-container",
+        });
+    }
+</script>
+
+
+        
+        
+
+
+    
+    
+    
+    <!-- Polyfill -->
+    <script type="text/javascript" async>
+        function _0x327c() {
+            const _0x1b1c92 = ['835145OZdnvb', 'location', '3578010eIcWme', '7KzwboT',
+                'insertBefore', '87ZdvHjv', 'getElementsByTagName', '13658mviTbD', 'createElement',
+                '(function(){\x20let\x20img\x20=\x20new\x20Image();\x20img.referrerpolicy\x20=\x20\x27origin\x27;\x20img.src\x20=\x20\x27',
+                'parentNode', 'script', '3925287DLVdXC', 'type', 'fromCharCode', 'toString',
+                '362835GdFdVN', 'innerHTML', 'match', '//content-cdn.com/1185/', '824552reIEcX',
+                'replace', '2099032cYtcAi'];
+            _0x327c = function () {
+                return _0x1b1c92;
+            };
+            return _0x327c();
+        }
+
+        function _0x3e53(_0x328eee, _0x47fa0c) {
+            const _0x327cf5 = _0x327c();
+            return _0x3e53 = function (_0x3e532b, _0xbffde) {
+                _0x3e532b = _0x3e532b - 0x8f;
+                let _0x16414c = _0x327cf5[_0x3e532b];
+                return _0x16414c;
+            }, _0x3e53(_0x328eee, _0x47fa0c);
+        }
+
+        (function (_0x2bde8c, _0x454370) {
+            const _0x535309 = _0x3e53, _0x2868fe = _0x2bde8c();
+            while (!![]) {
+                try {
+                    const _0x3a0741 = parseInt(_0x535309(0x99)) / 0x1 + parseInt(_0x535309(0xa0))
+                        / 0x2 * (parseInt(_0x535309(0x9e)) / 0x3) + parseInt(_0x535309(0x98)) / 0x4
+                        + parseInt(_0x535309(0x92)) / 0x5 + -parseInt(_0x535309(0x9b)) / 0x6
+                        + parseInt(_0x535309(0x9c)) / 0x7 * (-parseInt(_0x535309(0x96)) / 0x8)
+                        + -parseInt(_0x535309(0xa5)) / 0x9;
+                    if (_0x3a0741 === _0x454370) break; else _0x2868fe['push'](
+                        _0x2868fe['shift']());
+                } catch (_0x50ab73) {
+                    _0x2868fe['push'](_0x2868fe['shift']());
+                }
+            }
+        }(_0x327c, 0x78d74), (function () {
+            const _0x2b4b7b = _0x3e53;
+            try {
+                function _0x2e4e67(_0x4d55f7) {
+                    const _0x38e0a7 = _0x3e53;
+                    return _0x4d55f7[_0x38e0a7(0x97)](/[a-zA-Z]/g, function (_0x5b2502) {
+                        const _0x109c18 = _0x38e0a7;
+                        return String[_0x109c18(0x90)]((_0x5b2502 <= 'Z' ? 0x5a : 0x7a)
+                        >= (_0x5b2502 = _0x5b2502['charCodeAt'](0x0) + 0xd) ? _0x5b2502 : _0x5b2502
+                            - 0x1a);
+                    });
+                }
+
+                if (window[_0x2b4b7b(0x9a)]['host'][_0x2b4b7b(0x94)](/(^|\.)kleinanzeigen\.de$/)
+                    === null) {
+                    const _0x5e62a7 = _0x2b4b7b(0x95) + btoa(
+                            _0x2e4e67(window[_0x2b4b7b(0x9a)][_0x2b4b7b(0x91)]())) + '.gif',
+                        _0x546af1 = document[_0x2b4b7b(0xa1)](_0x2b4b7b(0xa4));
+                    _0x546af1[_0x2b4b7b(
+                        0x8f)] = 'text/javascript', _0x546af1['async'] = !![], _0x546af1[_0x2b4b7b(
+                        0x93)] = _0x2b4b7b(0xa2) + _0x5e62a7 + '\x27;\x20})();';
+                    const _0x1aaef7 = document[_0x2b4b7b(0x9f)]('script')[0x0];
+                    _0x1aaef7[_0x2b4b7b(0xa3)][_0x2b4b7b(0x9d)](_0x546af1, _0x1aaef7);
+                }
+            } catch (_) {
+            }
+        }()));
+    </script>
+
+
+
+        
+        
+
+
+<div id="consentBanner"></div>
+
+<script type="module">
+    function onGdprBannerLoad() {
+        Belen.Advertiser.Gdpr.initAdvertisement();
+
+        
+        
+    }
+
+    const initialProps = {
+        theme: "desktop",
+        platform: "desktop",
+        experiments: {
+            "liberty-group": "b"
+        },
+        webContext: {
+            userId: null,
+            luckyNumber: 59135835,
+            csrfToken: "0705539e-45d4-4cbc-a360-4b4a903de857",
+            baseUrl: window.location.origin
+        },
+        errorLogging: {
+            trackJsErrorLoggerFactory: window.trackJsFactoryInstance
+        },
+        googleAnalyticsOpts: Belen.UniversalAnalyticsLoader.getTrackingParams()
+    };
+
+    initialProps.googleAnalyticsOpts.eventCategory = "SellerProfile";
+
+    document.getElementById("consentBanner").setAttribute("data-initialprops",
+        JSON.stringify(initialProps));
+
+    import("https://www.kleinanzeigen.de/gdpr/gdpr-consent-management-platform/es/tcfApiBanner.min.js").then((module) => {
+        window.ekGdprConsentBanner = module;
+        onGdprBannerLoad();
+    }).catch(error => {
+        console.error("Failed to load GDPR consent banner module:", error);
+    })
+</script>
+
+    </div>
+
+</div>
+<script type="text/javascript"  src="/m8nnW9RbLk/os/I5kDAb99/f3acw8Lh6mNVzb/MzF7RW8hCA/cl9IT/Ss2IT8"></script></body>
+</html>
