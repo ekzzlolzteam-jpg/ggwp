@@ -1088,6 +1088,7 @@ def ocr_image(image_bytes: bytes, tesseract_cmd: str = "") -> str:
 # =====================================================================
 class TelegramAPI:
     def __init__(self, token: str):
+        self.token = token
         self.base = f"https://api.telegram.org/bot{token}/"
         self.file_base = f"https://api.telegram.org/file/bot{token}/"
         self.http = requests.Session()   # без прокси сайта: Telegram ходит напрямую
@@ -1107,7 +1108,8 @@ class TelegramAPI:
                 log.warning("Telegram %s: %s", method, data.get("description"))
                 return None
             except (requests.RequestException, ValueError) as exc:
-                log.warning("Telegram %s: %s (попытка %d)", method, exc, attempt + 1)
+                log.warning("Telegram %s: %s (попытка %d)", method,
+                            str(exc).replace(self.token, "<TOKEN>"), attempt + 1)   # токен не пишем в лог
                 time.sleep(2 * (attempt + 1))
         return None
 
@@ -1606,13 +1608,65 @@ def main() -> None:
         suite = unittest.defaultTestLoader.discover(str(BASE_DIR / "tests"))
         sys.exit(0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1)
     cfg_path = BASE_DIR / "config.json"
-    if not cfg_path.exists():
-        sys.exit("❌ Нет config.json. Скопируй config.example.json → config.json и впиши токен бота.")
-    cfg = load_config(cfg_path)
-    if not cfg["telegram_token"]:
-        sys.exit("❌ Не задан telegram_token (config.json или переменная KA_TELEGRAM_TOKEN)")
+    txt_path = BASE_DIR / "config.json.txt"      # Блокнот в Windows любит дописывать .txt
+    if not cfg_path.exists() and txt_path.exists():
+        txt_path.rename(cfg_path)
+        print("ℹ️  Переименовал config.json.txt → config.json")
+    if not cfg_path.exists() or "--setup" in sys.argv:
+        setup_wizard(cfg_path)
+    try:
+        cfg = load_config(cfg_path)
+    except (ValueError, json.JSONDecodeError) as exc:
+        fail(f"❌ Ошибка в config.json: {exc}\nИсправь файл или удали его и запусти скрипт заново.")
+    if not TOKEN_RE.match(cfg["telegram_token"] or ""):
+        fail("❌ В config.json нет правильного telegram_token. Запусти: python kleinanzeigen_bot.py --setup")
     setup_logging((BASE_DIR / cfg["data_dir"]).resolve())
     Bot(cfg).run()
+
+
+TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
+
+
+def fail(message: str) -> None:
+    print(message)
+    if os.name == "nt" and sys.stdin and sys.stdin.isatty():
+        input("Нажми Enter, чтобы закрыть окно…")   # чтобы окно не закрылось сразу
+    sys.exit(1)
+
+
+def setup_wizard(cfg_path: Path) -> None:
+    """Первый запуск: спрашивает токен/chat_id/прокси и создаёт config.json."""
+    if not (sys.stdin and sys.stdin.isatty()):
+        fail("❌ Нет config.json. Скопируй config.example.json → config.json и впиши токен бота.")
+    print("⚙️  Первичная настройка (создам config.json). Ctrl+C — отмена.\n")
+    example = BASE_DIR / "config.example.json"
+    cfg = json.loads(example.read_text(encoding="utf-8")) if example.exists() else dict(DEFAULT_CONFIG)
+    if cfg_path.exists():
+        cfg.update(json.loads(cfg_path.read_text(encoding="utf-8")))
+    while True:
+        token = input("1) Токен бота от @BotFather (вида 123456789:AAH...): ").strip().strip('"')
+        if TOKEN_RE.match(token):
+            break
+        print("   Не похоже на токен. Скопируй его целиком из сообщения @BotFather.")
+    try:
+        me = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=15).json()
+        if me.get("ok"):
+            print(f"   ✅ Бот найден: @{me['result'].get('username')}")
+        else:
+            print(f"   ⚠️ Telegram ответил: {me.get('description')} — проверь токен.")
+    except requests.RequestException as exc:
+        print(f"   ⚠️ Не удалось проверить токен (нет связи с Telegram?): {type(exc).__name__}")
+    print("2) Твой chat_id (цифры). Если не знаешь — просто нажми Enter:\n"
+          "   бот сам пришлёт его в ответ на любое сообщение, потом запусти --setup ещё раз.")
+    chats = [c for c in re.split(r"[\s,;]+", input("   chat_id: ").strip()) if c]
+    print("3) Прокси для сайта (Enter — без прокси). Формат: socks5://логин:пароль@ip:порт")
+    proxy = input("   прокси: ").strip().strip('"')
+    if proxy and "://" not in proxy:
+        proxy = "socks5://" + proxy
+    cfg.pop("_comment", None)
+    cfg.update(telegram_token=token, allowed_chat_ids=chats, proxy_url=proxy)
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n✅ Сохранено в {cfg_path}. Остальные настройки можно поменять в этом файле.\n")
 
 
 if __name__ == "__main__":
