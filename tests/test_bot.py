@@ -2,8 +2,10 @@
 
 Запуск:  python kleinanzeigen_bot.py --selftest    или    python -m unittest discover tests
 """
+import json
 import random
 import sys
+import time
 import tempfile
 import threading
 import unittest
@@ -227,14 +229,43 @@ class TestScanner(unittest.TestCase):
 
 
 class FakeTG:
-    def __init__(self):
-        self.sent = []
+    """Запоминает, что бот отправил/отредактировал; кнопки последнего экрана — в self.buttons."""
 
-    def send(self, chat_id, text, buttons=None):
+    def __init__(self):
+        self.sent, self.edits, self.deleted, self.buttons, self.keyboards = [], [], [], [], []
+        self.next_id = 100
+
+    def send(self, chat_id, text, buttons=None, keyboard=None):
         self.sent.append(text)
+        self.buttons = buttons or []
+        if keyboard:
+            self.keyboards.append(keyboard)
+        self.next_id += 1
+        return self.next_id
+
+    def edit(self, chat_id, message_id, text, buttons=None):
+        self.edits.append(text)
+        self.buttons = buttons or []
+
+    def delete(self, chat_id, message_id):
+        self.deleted.append(message_id)
 
     def call(self, *a, **k):
         return {}
+
+    @property
+    def last(self):
+        return (self.edits + self.sent)[-1] if not self._last_was_edit else self.edits[-1]
+
+    _last_was_edit = False
+
+    def data(self, text_part):
+        """callback_data кнопки, в подписи которой есть text_part."""
+        for row in self.buttons:
+            for b in row:
+                if text_part in b["text"]:
+                    return b["callback_data"]
+        raise AssertionError(f"нет кнопки «{text_part}» среди {[b['text'] for r in self.buttons for b in r]}")
 
 
 class TestMonitor(unittest.TestCase):
@@ -369,3 +400,199 @@ class TestRealOCR(unittest.TestCase):
             with self.subTest(fname=fname):
                 text = kb.ocr_image((SAMPLES / fname).read_bytes())
                 self.assertEqual(kb.parse_ocr_text(text)[:3], expected[:3])
+
+
+# =====================================================================
+# Кнопочный интерфейс бота — сценарий целиком
+# =====================================================================
+class TestButtonsUI(unittest.TestCase):
+    CHAT = "42"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.site = FakeSite(error_rate=0.02)
+        anchor = self.site.start_id + 350 * 3000 + 3
+        cfg_path = Path(self.tmp.name) / "config.json"
+        cfg_path.write_text('{"telegram_token": "x"}', encoding="utf-8")
+        self.bot = kb.Bot(dict(CFG, data_dir=self.tmp.name, allowed_chat_ids=[self.CHAT], telegram_token="x",
+                               seed_anchors=[[anchor, kb.fmt_date(self.site.date_of(anchor))]]), cfg_path)
+        self.bot.anchors = kb.AnchorStore(Path(self.tmp.name) / "a.txt", self.bot.cfg["seed_anchors"])
+        self.bot.tg = self.tg = FakeTG()
+        self.bot.fetcher = self.site
+        self.uid = 0
+
+    def tearDown(self):
+        self.bot.state["queue"].clear()
+        for _ in range(3):
+            if self.bot.job_thread:
+                self.bot.stop_event.set()
+                self.bot.pause_event.clear()
+                self.bot.job_thread.join(10)
+        self.tmp.cleanup()
+
+    def text(self, t, **extra):
+        self.uid += 1
+        self.bot.handle_update({"update_id": self.uid, "message": dict({"chat": {"id": int(self.CHAT)}, "text": t,
+                                                                         "message_id": 500 + self.uid}, **extra)})
+
+    def press(self, label):
+        self.uid += 1
+        data = self.tg.data(label)
+        self.bot.handle_update({"update_id": self.uid, "callback_query": {
+            "id": "c", "data": data, "message": {"chat": {"id": int(self.CHAT)}, "message_id": 77}}})
+
+    def wait_job(self):
+        for _ in range(300):
+            if not self.bot.job_running() and not self.bot.state["queue"]:
+                return
+            time.sleep(0.05)
+        self.fail("поиск не закончился")
+
+    def test_full_search_by_buttons(self):
+        d = date(2016, 9, 9)
+        ids = self.site.ids_on(d)
+        self.site.special[ids[600]] = kb.Profile(ids[600], "Arne Schwarzmann", d,
+                                                 {"satisfaction": "TOP Zufriedenheit", "reliability": "Zuverlässig"})
+        self.text("/start")
+        self.assertEqual(self.tg.keyboards[-1]["keyboard"][0][0]["text"], kb.M_SEARCH)
+        self.text(kb.M_SEARCH)
+        self.assertIn("Напиши имя", self.tg.sent[-1])
+        self.text("Arne  Schwarzmann")
+        self.press("2016")
+        self.press("Сен")
+        self.press("9")                                   # кнопка «9» — 9 сентября
+        self.assertIn("Отметь плашки", self.tg.edits[-1])
+        self.press("TOP")
+        self.press("Zuverlässig")
+        self.press("Sehr")                                # Sehr freundlich…
+        self.press("✅ Sehr")                             # …и снять обратно
+        self.assertIn("TOP Zufriedenheit, Zuverlässig", self.tg.edits[-1])
+        self.press("Готово")
+        card = self.tg.edits[-1]
+        self.assertIn("Arne Schwarzmann", card)
+        self.assertIn("09.09.2016", card)
+        self.press("Искать")
+        self.assertIn("Запускаю поиск", self.tg.sent[-1])
+        self.wait_job()
+        everything = "\n".join(self.tg.sent)
+        self.assertIn("НАЙДЕН ПОЛЬЗОВАТЕЛЬ", everything)
+        self.assertIn(str(ids[600]), everything)
+        self.assertIn(str(ids[600]), self.bot.state["watch"])           # авто-мониторинг
+        self.text(kb.M_RESULTS)
+        self.assertIn("Arne Schwarzmann", self.tg.sent[-1])
+        self.text(kb.M_TASKS)
+        self.assertIn("завершён", self.tg.sent[-1])
+        self.text(kb.M_STATUS)
+        self.assertIn("Проверено", self.tg.sent[-1])
+
+    def test_queue_and_card_edit(self):
+        self.text("Willi 01.10.2016")                     # текстом сразу в карточку
+        self.assertIn("Willi", self.tg.sent[-1])
+        self.press("📅 Дата")                              # исправить дату кнопками
+        self.press("2016")
+        self.press("Окт")
+        self.press("2")
+        self.assertIn("02.10.2016", self.tg.edits[-1])
+        self.press("Искать")
+        self.bot.pause_event.set()                        # пауза: первый поиск точно ещё идёт
+        self.text("Privat 05.10.2016 top")
+        self.press("Искать")
+        self.assertIn("очередь", self.tg.sent[-1])
+        self.text(kb.M_TASKS)
+        self.assertIn("Privat", self.tg.sent[-1])
+        self.press("Продолжить")                          # снять паузу
+        self.wait_job()
+        names = [h["target"]["name"] for h in self.bot.state["history"]]
+        self.assertEqual(names, ["Willi", "Privat"])
+
+    def test_stop_and_continue(self):
+        self.text("Willi 01.10.2016")
+        self.press("Искать")
+        self.bot.pause_event.set()
+        self.text(kb.M_TASKS)
+        self.press("Стоп")
+        self.bot.job_thread.join(10)
+        self.assertEqual(self.bot.job.status, "stopped")
+        self.text(kb.M_TASKS)
+        self.press("Продолжить поиск")
+        self.wait_job()
+        self.assertEqual(self.bot.job.status, "done")
+
+    def test_monitor_and_proxy_screens(self):
+        self.text(kb.M_MONITOR)
+        self.press("Добавить")
+        self.text("https://www.kleinanzeigen.de/s-bestandsliste.html?userId=40300011")
+        self.assertIn("40300011", self.bot.state["watch"])
+        self.text(kb.M_MONITOR)
+        self.press("Интервал")
+        self.press("30–60")
+        self.assertEqual((self.bot.cfg["monitor_minutes_min"], self.bot.cfg["monitor_minutes_max"]), (30, 60))
+        self.text(kb.M_MONITOR)
+        self.press("🗑")
+        self.assertNotIn("40300011", self.bot.state["watch"])
+
+        self.text(kb.M_PROXY)
+        self.press("Изменить")
+        self.text("user:secret@1.2.3.4:5000")
+        self.assertEqual(self.bot.cfg["proxy_url"], "socks5://user:secret@1.2.3.4:5000")
+        self.assertTrue(self.tg.deleted, "сообщение с паролем должно удаляться")
+        self.assertNotIn("secret", self.tg.sent[-1])
+        saved = json.loads((Path(self.tmp.name) / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["proxy_url"], "socks5://user:secret@1.2.3.4:5000")
+        self.press("12/с")
+        self.assertEqual(saved["telegram_token"], "x")
+        self.assertEqual(self.bot.cfg["requests_per_second"], 12)
+        self.press("без прокси")
+        self.assertEqual(self.bot.cfg["proxy_url"], "")
+
+    def test_screenshot_goes_to_card(self):
+        self.bot.tg.download = lambda file_id: b"img"
+        orig = kb.ocr_image
+        kb.ocr_image = lambda data, cmd="": OCR_RAW["screen_arne.png"]
+        try:
+            self.bot.handle_photo(self.CHAT, "file")
+        finally:
+            kb.ocr_image = orig
+        card = self.tg.sent[-1]
+        self.assertIn("Arne Schwarzmann", card)
+        self.assertIn("05.03.2016", card)
+        self.assertIn("TOP Zufriedenheit, Zuverlässig", card)
+        self.press("Плашки")                              # плашки можно поправить кнопками
+        self.assertIn("✅ TOP", str(self.tg.buttons))
+
+
+class TestRobustness(unittest.TestCase):
+    def test_charref_without_semicolon(self):
+        html = (SAMPLES / "profile_43061549.html").read_text(encoding="utf-8")
+        html = html.replace("Hengersberg", "&#8203Elbe\n    </div>", 1)
+        self.assertNotIn("&#8203", kb.normalize_html(html))
+        p = kb.parse_profile_html(html, 43061549)
+        self.assertEqual((p.name, len(p.listings)), ("Alex", 2))
+        self.assertEqual(kb.normalize_html("&#60;b&#62; &#228; &#x200bX"), "&lt;b&gt; ä X")
+
+    def test_parse_error_is_one_id_error_not_crash(self):
+        class Resp:
+            status_code, text = 200, "<html>Aktiv seit 01.01.2020</html>"
+
+        class Sess:
+            def get(self, *a, **k):
+                return Resp()
+
+        f = kb.Fetcher(dict(CFG, max_retries=0))
+        f._local.session, f._local.gen = Sess(), 0
+        orig = kb.parse_profile_html
+        kb.parse_profile_html = lambda *a: int("8203Elbe")
+        try:
+            res = f.get(1)
+        finally:
+            kb.parse_profile_html = orig
+        self.assertEqual(res.status, "error")
+        self.assertIn("parse", res.error)
+
+    def test_proxy_formats(self):
+        self.assertEqual(kb.normalize_proxy("socks5://u:p@1.2.3.4:5000"), "socks5://u:p@1.2.3.4:5000")
+        self.assertEqual(kb.normalize_proxy("u:p@1.2.3.4:5000"), "socks5://u:p@1.2.3.4:5000")
+        self.assertEqual(kb.normalize_proxy("1.2.3.4:5000:u:p"), "socks5://u:p@1.2.3.4:5000")
+        self.assertEqual(kb.normalize_proxy("http://1.2.3.4:8080"), "http://1.2.3.4:8080")
+        self.assertIsNone(kb.normalize_proxy("привет"))
+        self.assertEqual(kb.mask_proxy("socks5://u:p@1.2.3.4:5000"), "socks5://u:***@1.2.3.4:5000")

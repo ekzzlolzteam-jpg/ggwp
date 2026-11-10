@@ -325,7 +325,28 @@ def _int_after(pattern: str, text: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+_ZERO_WIDTH = {0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0xAD}
+_CHARREF_RE = re.compile(r"&#(?:([0-9]+)|[xX](200[bBcCdD]|2060|[fF][eE][fF][fF]|[aA][dD]"
+                         r"|[0-9a-fA-F]{1,6}(?=;|[^0-9a-fA-F]|$)));?")
+_SPECIAL = {0x26: "&amp;", 0x3C: "&lt;", 0x3E: "&gt;", 0x22: "&quot;", 0x27: "&apos;"}  # не ломаем разметку
+
+
+def normalize_html(raw_html: str) -> str:
+    """Заменяет числовые ссылки &#...; на символы до разбора.
+
+    Сайт пишет «&#8203» (невидимый пробел) БЕЗ точки с запятой прямо перед
+    названием города: «&#8203Elbe». Старые beautifulsoup4 (<4.13) на этом
+    падали: ValueError: invalid literal for int() with base 10: '8203Elbe…'."""
+    def fix(m: re.Match) -> str:
+        cp = int(m.group(1)) if m.group(1) else int(m.group(2), 16)
+        if cp in _ZERO_WIDTH or cp == 0 or cp > 0x10FFFF or 0xD800 <= cp <= 0xDFFF:
+            return ""
+        return _SPECIAL.get(cp) or chr(cp)
+    return _CHARREF_RE.sub(fix, raw_html).replace("&#", "&amp;#")
+
+
 def parse_profile_html(raw_html: str, user_id: int) -> Profile:
+    raw_html = normalize_html(raw_html)
     soup = BeautifulSoup(raw_html, "html.parser")
     text = soup.get_text(" ", strip=True)
     prof = Profile(user_id=user_id)
@@ -386,12 +407,18 @@ class Fetcher:
         self._blocked_streak = 0
         self._block_level = 0
         self._local = threading.local()
+        self._gen = 0                   # меняется при смене прокси -> сессии пересоздаются
         self.stats = {"requests": 0, "ok": 0, "missing": 0, "blocked": 0, "errors": 0}
+
+    def set_proxy(self, url: str) -> None:
+        with self._lock:
+            self.cfg["proxy_url"] = url
+            self._gen += 1
 
     # --- сессии по потокам ---
     def _session(self) -> requests.Session:
         s = getattr(self._local, "session", None)
-        if s is None:
+        if s is None or getattr(self._local, "gen", -1) != self._gen:
             s = requests.Session()
             s.headers.update({
                 "User-Agent": random.choice(USER_AGENTS),
@@ -401,6 +428,7 @@ class Fetcher:
             if self.cfg.get("proxy_url"):
                 s.proxies.update({"http": self.cfg["proxy_url"], "https": self.cfg["proxy_url"]})
             self._local.session = s
+            self._local.gen = self._gen
         return s
 
     # --- лимит скорости (общий на все потоки) ---
@@ -464,7 +492,14 @@ class Fetcher:
                 if code == 200:
                     body = resp.text
                     if looks_like_profile(body):
-                        prof = parse_profile_html(body, user_id)
+                        try:
+                            prof = parse_profile_html(body, user_id)
+                        except Exception as exc:   # кривая страница — ошибка одного ID, а не всего поиска
+                            log.warning("Не удалось разобрать страницу %s: %s: %s", user_id,
+                                        type(exc).__name__, str(exc)[:100])
+                            with self._lock:
+                                self.stats["errors"] += 1
+                            return FetchResult("error", http_code=code, error=f"parse {type(exc).__name__}")
                         if prof.page_user_id not in (None, user_id):
                             prof.name = prof.aktiv_seit = None   # редирект на чужой профиль
                         if prof.aktiv_seit or prof.name:
@@ -485,7 +520,7 @@ class Fetcher:
                     last = FetchResult("error", http_code=code, error=f"HTTP {code}")
                 else:
                     last = FetchResult("error", http_code=code, error=f"HTTP {code}")
-            except requests.RequestException as exc:
+            except Exception as exc:   # requests / socks / ssl — всё считаем сетевой ошибкой
                 last = FetchResult("error", error=type(exc).__name__)
             if blocked:
                 self._on_blocked()
@@ -1105,7 +1140,9 @@ class TelegramAPI:
                 if retry:
                     time.sleep(retry + 1)
                     continue
-                log.warning("Telegram %s: %s", method, data.get("description"))
+                desc = str(data.get("description", ""))
+                if "message is not modified" not in desc:
+                    log.warning("Telegram %s: %s", method, desc)
                 return None
             except (requests.RequestException, ValueError) as exc:
                 log.warning("Telegram %s: %s (попытка %d)", method,
@@ -1113,12 +1150,30 @@ class TelegramAPI:
                 time.sleep(2 * (attempt + 1))
         return None
 
-    def send(self, chat_id: str, text: str, buttons: Optional[list] = None) -> None:
-        for i in range(0, max(1, len(text)), 4000):
-            params = {"chat_id": chat_id, "text": text[i:i + 4000], "disable_web_page_preview": True}
-            if buttons and i + 4000 >= len(text):
-                params["reply_markup"] = {"inline_keyboard": buttons}
-            self.call("sendMessage", **params)
+    def send(self, chat_id: str, text: str, buttons: Optional[list] = None,
+             keyboard: Optional[dict] = None) -> Optional[int]:
+        """Отправляет сообщение (длинное — частями). buttons — inline-кнопки под последней частью,
+        keyboard — нижнее меню. Возвращает message_id последней части."""
+        chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)] or [""]
+        msg_id = None
+        for n, chunk in enumerate(chunks):
+            params = {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}
+            if n == len(chunks) - 1:
+                if buttons:
+                    params["reply_markup"] = {"inline_keyboard": buttons}
+                elif keyboard:
+                    params["reply_markup"] = keyboard
+            res = self.call("sendMessage", **params)
+            if res:
+                msg_id = res.get("message_id")
+        return msg_id
+
+    def edit(self, chat_id: str, message_id: int, text: str, buttons: Optional[list] = None) -> None:
+        self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text[:4000],
+                  disable_web_page_preview=True, reply_markup={"inline_keyboard": buttons or []})
+
+    def delete(self, chat_id: str, message_id: int) -> None:
+        self.call("deleteMessage", chat_id=chat_id, message_id=message_id)
 
     def download(self, file_id: str) -> bytes:
         meta = self.call("getFile", file_id=file_id)
@@ -1129,33 +1184,74 @@ class TelegramAPI:
         return r.content
 
 
-HELP = """🔎 Поиск пользователя Kleinanzeigen
+# --- главное меню (нижняя клавиатура) ---
+M_SEARCH, M_TASKS, M_STATUS = "🔍 Поиск по имени", "📋 Задачи", "📊 Статус"
+M_RESULTS, M_MONITOR, M_PROXY = "🏆 Результаты", "👁 Мониторинг", "🌐 Прокси"
+MAIN_KEYBOARD = {
+    "keyboard": [[{"text": M_SEARCH}, {"text": M_TASKS}],
+                 [{"text": M_STATUS}, {"text": M_RESULTS}],
+                 [{"text": M_MONITOR}, {"text": M_PROXY}]],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
 
-Пришли СКРИНШОТ профиля или ТЕКСТ, например:
-Имя: Manuela
-Дата регистрации: 08.02.2017
-Плашки: TOP Zufriedenheit, Besonders freundlich
+HELP = f"""🔎 Поиск пользователя Kleinanzeigen
 
-или построчно (имя / дата / плашки / подписчики / объявления),
-или одной строкой: Manuela 08.02.2017 top, sehr freundlich
+Всё управляется кнопками внизу:
+{M_SEARCH} — ввести имя, выбрать дату и плашки кнопками
+{M_TASKS} — текущий поиск и очередь (пауза, стоп, продолжить)
+{M_STATUS} — прогресс и скорость
+{M_RESULTS} — найденные пользователи
+{M_MONITOR} — слежка за новыми объявлениями
+{M_PROXY} — прокси и скорость запросов
 
-Бот покажет распознанное → жми «🔍 Искать» (или исправь текстом).
+📸 В любой момент можно просто прислать СКРИНШОТ профиля —
+бот распознает имя, дату и плашки и предложит начать поиск.
+Можно и текстом одной строкой: Manuela 08.02.2017 top, sehr freundlich"""
 
-Команды:
-/status — прогресс поиска и мониторинга
-/pause, /resume, /stop — управление поиском
-/recheck — перепроверить ID с ошибками
-/watch <id|ссылка> — следить за новыми объявлениями
-/unwatch <id> — перестать следить
-/watchlist — список отслеживаемых
-/check — проверить отслеживаемых прямо сейчас
-/anchor <id> <дд.мм.гггг> — добавить известную пару ID→дата
-/cancel — сбросить ввод"""
+MONTHS_RU = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"]
+BADGE_PICKER = {   # код категории -> (категория, [(ключ уровня, подпись кнопки)])
+    "s": ("satisfaction", [("top", "TOP"), ("ok", "OK"), ("naja", "Naja")]),
+    "f": ("friendliness", [("", "Freundlich"), ("sehr", "Sehr"), ("besonders", "Besonders")]),
+    "r": ("reliability", [("", "Zuverlässig"), ("sehr", "Sehr"), ("besonders", "Besonders")]),
+}
+CATEGORY_TITLE = {"satisfaction": "😊 Оценка", "friendliness": "🙂 Дружелюбие", "reliability": "👍 Надёжность"}
+RPS_CHOICES = (4, 8, 12, 15, 20)
+INTERVAL_CHOICES = ((5, 15), (10, 30), (30, 60), (60, 120))
+JOB_STATUS_RU = {"locating": "ищу диапазон", "scanning": "перебор", "done": "завершён",
+                 "stopped": "остановлен", "failed": "ошибка", "queued": "в очереди"}
+
+
+def btn(text: str, data: str) -> dict:
+    return {"text": text, "callback_data": data[:64]}
+
+
+def chunked(items: list, size: int) -> list:
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def mask_proxy(url: str) -> str:
+    return re.sub(r"//([^:@/]+):([^@/]+)@", r"//\1:***@", url) if url else "не используется"
+
+
+def normalize_proxy(text: str) -> Optional[str]:
+    """«user:pass@ip:port» / «socks5://…» / «ip:port» → URL прокси или None, если не похоже."""
+    p = text.strip().strip('"').strip()
+    if not p:
+        return None
+    if "://" not in p:
+        parts = p.split(":")
+        if "@" not in p and len(parts) == 4 and parts[1].isdigit():   # ip:port:user:pass
+            p = f"{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+        p = "socks5://" + p
+    m = re.match(r"^(socks5h?|socks4|https?)://(?:[^:@/\s]+:[^@/\s]+@)?[\w.-]+:\d{2,5}/?$", p)
+    return p.rstrip("/") if m else None
 
 
 class Bot:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, cfg_path: Optional[Path] = None):
         self.cfg = cfg
+        self.cfg_path = cfg_path
         self.data_dir = (BASE_DIR / cfg["data_dir"]).resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.data_dir / "state.json"
@@ -1171,17 +1267,21 @@ class Bot:
         self.phase = ""
         self.monitor_wakeup = threading.Event()
 
-    # --- состояние ---
+    # ------------------------------------------------------------------
+    # состояние и настройки
+    # ------------------------------------------------------------------
     def _load_state(self) -> dict:
+        st: dict = {}
         if self.state_path.exists():
             try:
                 st = json.loads(self.state_path.read_text(encoding="utf-8"))
-                st.setdefault("watch", {})
-                st.setdefault("pending", {})
-                return st
             except (OSError, json.JSONDecodeError) as exc:
                 log.error("state.json повреждён (%s), начинаю с чистого", exc)
-        return {"offset": None, "watch": {}, "pending": {}, "job": None}
+        for key, default in (("offset", None), ("watch", {}), ("ui", {}), ("queue", []),
+                             ("history", []), ("job", None)):
+            st.setdefault(key, default)
+        st.pop("pending", None)   # формат старой версии
+        return st
 
     def save(self) -> None:
         with self.lock:
@@ -1190,15 +1290,43 @@ class Bot:
             tmp.write_text(json.dumps(self.state, ensure_ascii=False, indent=1), encoding="utf-8")
             tmp.replace(self.state_path)
 
-    # --- сообщения ---
+    def save_config(self, **changes) -> None:
+        """Меняет настройки на лету и записывает их в config.json."""
+        self.cfg.update(changes)
+        if not self.cfg_path:
+            return
+        try:
+            data = json.loads(self.cfg_path.read_text(encoding="utf-8")) if self.cfg_path.exists() else {}
+            data.update(changes)
+            self.cfg_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, json.JSONDecodeError) as exc:
+            log.error("Не удалось сохранить config.json: %s", exc)
+
+    def ui(self, chat_id: str) -> dict:
+        return self.state["ui"].setdefault(chat_id, {"step": None, "draft": {}, "then": "flow"})
+
+    # ------------------------------------------------------------------
+    # сообщения
+    # ------------------------------------------------------------------
     def broadcast(self, text: str, buttons: Optional[list] = None) -> None:
         log.info("→ TG: %s", text.replace("\n", " | ")[:200])
         for chat_id in self.cfg["allowed_chat_ids"]:
             self.tg.send(chat_id, text, buttons)
 
-    # --- поиск ---
+    def show(self, chat_id: str, text: str, buttons: Optional[list] = None, msg_id: Optional[int] = None) -> None:
+        """Обновляет сообщение с кнопками (если нажали кнопку) или присылает новое."""
+        if msg_id:
+            self.tg.edit(chat_id, msg_id, text, buttons)
+        else:
+            self.tg.send(chat_id, text, buttons)
+
+    # ------------------------------------------------------------------
+    # поиск: запуск, очередь, история
+    # ------------------------------------------------------------------
     def job_running(self) -> bool:
-        return self.job_thread is not None and self.job_thread.is_alive()
+        t = self.job_thread
+        # поток поиска, который сам запускает следующий из очереди, «занятым» не считается
+        return t is not None and t.is_alive() and t is not threading.current_thread()
 
     def start_job(self, job: Job) -> None:
         self.job = job
@@ -1208,6 +1336,33 @@ class Bot:
         self.job_thread = threading.Thread(target=self._run_job, name="search", daemon=True)
         self.job_thread.start()
 
+    def submit_search(self, target: Target) -> str:
+        """Запускает поиск или ставит в очередь, если уже что-то ищется."""
+        with self.lock:
+            if self.job_running():
+                self.state["queue"].append(target.to_dict())
+                self.save()
+                return f"⏳ Уже идёт поиск — добавил в очередь (№{len(self.state['queue'])}): " \
+                       f"{target.name}, {fmt_date(target.aktiv_seit)}"
+            self.start_job(Job(target=target.to_dict()))
+        return f"🚀 Запускаю поиск: {target.name}, {fmt_date(target.aktiv_seit)}\nХод поиска — в «{M_TASKS}»."
+
+    def _start_next_from_queue(self) -> None:
+        with self.lock:
+            if self.job_running() or not self.state["queue"]:
+                return
+            target = Target.from_dict(self.state["queue"].pop(0))
+            self.start_job(Job(target=target.to_dict()))
+        self.broadcast(f"▶️ Следующий поиск из очереди: {target.name}, {fmt_date(target.aktiv_seit)}")
+
+    def _archive(self, job: Job) -> None:
+        entry = {"target": job.target, "status": job.status, "first": job.first, "last": job.last,
+                 "checked": job.checked, "total": job.total, "errors": len(job.error_ids),
+                 "matches": job.matches, "started": job.started, "finished": time.time()}
+        with self.lock:
+            hist = [h for h in self.state["history"] if h.get("started") != job.started]
+            self.state["history"] = (hist + [entry])[-30:]
+
     def _on_match(self, m: Match) -> None:
         if m.level == "conflict":
             log.info("Совпало имя, но не плашки: %s %s", m.user_id, m.notes)
@@ -1215,7 +1370,7 @@ class Bot:
         head = "🎯 НАЙДЕН ПОЛЬЗОВАТЕЛЬ!" if m.level == "exact" else "🤔 Возможное совпадение"
         notes = ("\n" + "\n".join("• " + n for n in m.notes)) if m.notes else ""
         self.broadcast(f"{head}\n{m.name} (ID {m.user_id})\n{m.url}{notes}",
-                       [[{"text": "👁 Следить за объявлениями", "callback_data": f"watch:{m.user_id}"}]])
+                       [[btn("👁 Следить за объявлениями", f"w:add:{m.user_id}")]])
 
     def _run_job(self) -> None:
         job = self.job
@@ -1229,9 +1384,9 @@ class Bot:
                 job.first, job.last = locator.locate(target.aktiv_seit)
                 self.save()
                 eta = job.total / self.cfg["requests_per_second"] / 60
-                self.broadcast(f"📍 Диапазон для {fmt_date(target.aktiv_seit)}: ID {job.first:,}–{job.last:,} "
-                               f"({job.total:,} ID, ~{eta:.0f} мин). Запросов на поиск диапазона: "
-                               f"{locator.requests}. Начинаю перебор…")
+                self.broadcast(f"📍 {target.name}: диапазон для {fmt_date(target.aktiv_seit)} — ID "
+                               f"{job.first:,}–{job.last:,} ({job.total:,} ID, ~{eta:.0f} мин). "
+                               f"Запросов на поиск диапазона: {locator.requests}. Начинаю перебор…")
             job.status = "scanning"
             self.phase = "перебор"
             scanner = Scanner(self.fetcher, self.cfg, self.stop_event, self.pause_event, self._on_match, self.save)
@@ -1242,21 +1397,23 @@ class Bot:
                 job.status = "stopped"
             else:
                 job.status, job.message = "failed", str(exc)
-                self.broadcast(f"❌ Не удалось найти диапазон: {exc}")
+                self.broadcast(f"❌ {target.name}: не удалось найти диапазон: {exc}")
         except Exception as exc:   # не роняем бота
             log.exception("Ошибка поиска")
-            job.status, job.message = "failed", f"{type(exc).__name__}: {exc}"
-            self.broadcast(f"💥 Ошибка поиска: {job.message}\nПрогресс сохранён, можно /resume")
+            job.status, job.message = "failed", f"{type(exc).__name__}: {str(exc)[:200]}"
+            self.broadcast(f"💥 Ошибка поиска: {job.message}\nПрогресс сохранён — «{M_TASKS}» → ▶️ Продолжить.")
         finally:
             self.anchors.flush()
             self.phase = ""
+            self._archive(job)
             self.save()
         if job.status in ("done", "stopped"):
-            self.broadcast(self.report(job))
+            self.broadcast(self.report(job), self._watch_buttons(job.matches))
             if job.status == "done" and self.cfg["auto_watch_on_match"]:
                 for m in job.matches:
                     if m["level"] == "exact":
                         self.add_watch(m["user_id"], m["name"])
+        self._start_next_from_queue()
 
     def report(self, job: Job) -> str:
         t = Target.from_dict(job.target)
@@ -1266,27 +1423,40 @@ class Bot:
         if job.first is not None:
             lines.append(f"Диапазон: {job.first:,}–{job.last:,}; проверено {job.checked:,}/{job.total:,} "
                          f"(профилей {job.profiles:,}, пустых {job.missing:,}, ошибок {len(job.error_ids)})")
+        lines += self._matches_lines(job.matches)
+        if job.error_ids and not job.has_exact():
+            lines.append(f"\n⚠️ {len(job.error_ids)} ID не удалось проверить — «{M_TASKS}» → 🔁 Перепроверить")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _matches_lines(matches: list) -> list[str]:
+        lines = []
         groups = (("exact", "🎯 Точные совпадения"), ("partial", "🤔 Возможные"),
                   ("conflict", "↔️ То же имя, другие плашки"))
         for level, title in groups:
-            items = [m for m in job.matches if m["level"] == level]
+            items = [m for m in matches if m["level"] == level]
             if items:
                 lines.append(f"\n{title}:")
                 lines += [f"• {m['name']} — {PROFILE_URL.format(uid=m['user_id'])}"
                           + (f" ({'; '.join(m['notes'])})" if m["notes"] else "") for m in items]
-        if not job.matches:
+        if not matches:
             lines.append("\n❌ Совпадений не найдено.")
-        if job.error_ids and not job.has_exact():
-            lines.append(f"\n⚠️ {len(job.error_ids)} ID не удалось проверить — /recheck")
-        return "\n".join(lines)
+        return lines
 
+    def _watch_buttons(self, matches: list) -> Optional[list]:
+        rows = [[btn(f"👁 Следить: {m['name'][:24]}", f"w:add:{m['user_id']}")]
+                for m in matches if m["level"] in ("exact", "partial") and str(m["user_id"]) not in self.state["watch"]]
+        return rows[:8] or None
+
+    # ------------------------------------------------------------------
+    # экраны: статус, задачи, результаты
+    # ------------------------------------------------------------------
     def status_text(self) -> str:
-        parts = []
+        parts = ["📊 Статус"]
         job = self.job
         if job:
             t = Target.from_dict(job.target)
-            st = {"locating": "ищу диапазон", "scanning": "перебор", "done": "завершён", "stopped": "остановлен",
-                  "failed": "ошибка"}.get(job.status, job.status)
+            st = JOB_STATUS_RU.get(job.status, job.status)
             if self.pause_event.is_set() and self.job_running():
                 st = "⏸ пауза"
             parts.append(f"Поиск: {t.name} / {fmt_date(t.aktiv_seit)} — {st}")
@@ -1294,22 +1464,187 @@ class Bot:
                 parts.append(f"Этап: {self.phase}")
             if job.total:
                 pct = job.checked / job.total * 100
-                parts.append(f"Проверено {job.checked:,}/{job.total:,} ({pct:.1f}%), профилей {job.profiles:,}, "
-                             f"ошибок {len(job.error_ids)}, совпадений {len(job.matches)}")
+                left = max(0, (job.last or 0) - (job.cursor or job.first or 0) + 1)
+                eta = left / max(1, self.cfg["requests_per_second"]) / 60
+                parts.append(f"Проверено {job.checked:,}/{job.total:,} ({pct:.1f}%)"
+                             + (f", осталось ~{eta:.0f} мин" if self.job_running() else ""))
+                parts.append(f"Профилей {job.profiles:,}, пустых {job.missing:,}, ошибок {len(job.error_ids)}, "
+                             f"совпадений {len(job.matches)}")
             if job.message:
                 parts.append(job.message)
         else:
-            parts.append("Поиск не запускался.")
+            parts.append("Поиск ещё не запускался.")
+        if self.state["queue"]:
+            parts.append(f"В очереди: {len(self.state['queue'])}")
         paused = getattr(self.fetcher, "paused_for", lambda: 0)()
         if paused:
             parts.append(f"⛔ Автопауза из-за блокировки: ещё {paused // 60 + 1} мин")
         s = getattr(self.fetcher, "stats", None)
         if s:
             parts.append(f"Запросов: {s['requests']:,} (блокировок {s['blocked']}, ошибок {s['errors']})")
-        parts.append(f"Мониторинг: {len(self.state['watch'])} аккаунт(ов). Якорей в базе: {len(self.anchors):,}")
+        parts.append(f"Скорость: {self.cfg['requests_per_second']}/с · прокси: "
+                     f"{'да' if self.cfg.get('proxy_url') else 'нет'}")
+        parts.append(f"Мониторинг: {len(self.state['watch'])} акк. · якорей в базе: {len(self.anchors):,}")
         return "\n".join(parts)
 
-    # --- мониторинг ---
+    def screen_status(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+        self.show(chat_id, self.status_text(), [[btn("🔄 Обновить", "s:refresh"), btn("📋 Задачи", "t:refresh")]],
+                  msg_id)
+
+    def screen_tasks(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+        lines = ["📋 Задачи"]
+        rows: list = []
+        job = self.job
+        running = self.job_running()
+        if job:
+            t = Target.from_dict(job.target)
+            st = "⏸ пауза" if running and self.pause_event.is_set() else JOB_STATUS_RU.get(job.status, job.status)
+            prog = f" — {job.checked / job.total * 100:.0f}%" if job.total else ""
+            lines.append(f"{'▶️' if running else '•'} {t.name} / {fmt_date(t.aktiv_seit)} — {st}{prog}")
+            if running:
+                rows.append([btn("▶️ Продолжить", "t:resume") if self.pause_event.is_set() else btn("⏸ Пауза", "t:pause"),
+                             btn("⏹ Стоп", "t:stop")])
+            else:
+                unfinished = job.status in ("stopped", "failed", "locating", "scanning") and \
+                    (job.cursor is None or job.last is None or job.cursor <= job.last)
+                if unfinished:
+                    rows.append([btn("▶️ Продолжить поиск", "t:continue")])
+                if job.error_ids:
+                    rows.append([btn(f"🔁 Перепроверить ошибки ({len(job.error_ids)})", "t:recheck")])
+        else:
+            lines.append("Поисков пока не было.")
+        if self.state["queue"]:
+            lines.append("\nОчередь:")
+            for i, q in enumerate(self.state["queue"]):
+                lines.append(f"{i + 1}. {q['name']} / {q['aktiv_seit']}")
+                rows.append([btn(f"🗑 Убрать {i + 1}. {q['name'][:20]}", f"t:del:{i}")])
+        rows.append([btn("🔄 Обновить", "t:refresh"), btn(M_SEARCH, "c:new")])
+        self.show(chat_id, "\n".join(lines), rows, msg_id)
+
+    def screen_results(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+        entries = list(reversed(self.state["history"]))[:10]
+        if self.job and self.job_running():
+            entries.insert(0, {"target": self.job.target, "status": self.job.status, "matches": self.job.matches,
+                               "checked": self.job.checked, "total": self.job.total})
+        if not entries:
+            self.show(chat_id, "🏆 Результатов пока нет — запусти поиск.", [[btn(M_SEARCH, "c:new")]], msg_id)
+            return
+        lines = ["🏆 Результаты (последние поиски)"]
+        all_matches = []
+        for e in entries:
+            t = e["target"]
+            st = JOB_STATUS_RU.get(e["status"], e["status"])
+            prog = f", {e['checked']:,}/{e['total']:,}" if e.get("total") else ""
+            lines.append(f"\n📅 {t['aktiv_seit']} · {t['name']} — {st}{prog}")
+            good = [m for m in e["matches"] if m["level"] in ("exact", "partial")]
+            for m in e["matches"]:
+                icon = {"exact": "🎯", "partial": "🤔", "conflict": "↔️"}[m["level"]]
+                lines.append(f"  {icon} {m['name']} — {PROFILE_URL.format(uid=m['user_id'])}")
+            if not e["matches"]:
+                lines.append("  — совпадений нет")
+            all_matches += good
+        self.show(chat_id, "\n".join(lines), (self._watch_buttons(all_matches) or []) + [[btn("🔄 Обновить", "r:refresh")]],
+                  msg_id)
+
+    # ------------------------------------------------------------------
+    # мастер поиска: имя → дата → плашки → карточка
+    # ------------------------------------------------------------------
+    @staticmethod
+    def draft_text(d: dict) -> str:
+        lines = [f"👤 Имя: {d.get('name') or '❓ не задано'}",
+                 f"📅 Дата регистрации: {d.get('aktiv_seit') or '❓ не задана'}",
+                 f"🏷 Плашки: {badges_str(d.get('badges') or {})}"]
+        if d.get("followers") is not None:
+            lines.append(f"Подписчики: {d['followers']}")
+        if d.get("online_ads") is not None:
+            lines.append(f"Объявления онлайн: {d['online_ads']}")
+        return "\n".join(lines)
+
+    def screen_card(self, chat_id: str, msg_id: Optional[int] = None, title: str = "Проверь данные") -> None:
+        u = self.ui(chat_id)
+        u["step"], u["then"] = None, "card"
+        d = u["draft"]
+        ready = d.get("name") and d.get("aktiv_seit")
+        rows = [[btn("🔍 Искать", "c:go")]] if ready else []
+        rows += [[btn("✏️ Имя", "c:name"), btn("📅 Дата", "c:date"), btn("🏷 Плашки", "c:badges")],
+                 [btn("❌ Отмена", "c:cancel")]]
+        hint = "\n\nВсё верно? Жми «🔍 Искать» или исправь кнопками." if ready else \
+            "\n\nНе хватает имени или даты — задай кнопками ниже."
+        self.show(chat_id, f"{title}:\n\n{self.draft_text(d)}{hint}", rows, msg_id)
+
+    def ask_name(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+        u = self.ui(chat_id)
+        u["step"] = "name"
+        self.show(chat_id, "👤 Напиши имя пользователя точно как на профиле\n(например: Arne Schwarzmann)",
+                  [[btn("❌ Отмена", "c:cancel")]], msg_id)
+
+    def year_picker(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+        self.ui(chat_id)["step"] = "date"
+        years = [btn(str(y), f"d:y:{y}") for y in range(2009, date.today().year + 1)]
+        rows = chunked(years, 4) + [[btn("❌ Отмена", "c:cancel")]]
+        self.show(chat_id, "📅 Год регистрации («Aktiv seit»)?\nИли напиши дату текстом: 08.02.2017", rows, msg_id)
+
+    def month_picker(self, chat_id: str, year: int, msg_id: Optional[int]) -> None:
+        months = [btn(MONTHS_RU[m - 1], f"d:m:{year}:{m}") for m in range(1, 13)
+                  if date(year, m, 1) <= date.today()]
+        self.show(chat_id, f"📅 {year} — месяц?", chunked(months, 4) + [[btn("⬅️ Год", "d:y")]], msg_id)
+
+    def day_picker(self, chat_id: str, year: int, month: int, msg_id: Optional[int]) -> None:
+        import calendar
+        days = [btn(str(d), f"d:d:{year}:{month}:{d}") for d in range(1, calendar.monthrange(year, month)[1] + 1)
+                if date(year, month, d) <= date.today()]
+        self.show(chat_id, f"📅 {MONTHS_RU[month - 1]} {year} — число?",
+                  chunked(days, 7) + [[btn("⬅️ Месяц", f"d:y:{year}")]], msg_id)
+
+    def badge_picker(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+        u = self.ui(chat_id)
+        u["step"] = "badges"
+        badges = u["draft"].setdefault("badges", {})
+        rows = []
+        for code, (cat, options) in BADGE_PICKER.items():
+            rows.append([btn(f"— {CATEGORY_TITLE[cat]} —", "noop")])
+            row = [btn(("✅ " if badges.get(cat) == BADGE_LABELS[cat][key] else "") + label, f"b:{code}:{key or '-'}")
+                   for key, label in options]
+            row.append(btn(("✅ " if cat not in badges else "") + "нет", f"b:{code}:x"))
+            rows.append(row)
+        rows.append([btn("✅ Готово", "b:done")])
+        self.show(chat_id, f"🏷 Отметь плашки как на профиле (если плашки нет — «нет»).\n"
+                           f"Сейчас: {badges_str(badges)}", rows, msg_id)
+
+    def after_name(self, chat_id: str) -> None:
+        d = self.ui(chat_id)["draft"]
+        if self.ui(chat_id)["then"] == "card" or d.get("aktiv_seit"):
+            self.screen_card(chat_id)
+        else:
+            self.year_picker(chat_id)
+
+    def after_date(self, chat_id: str, msg_id: Optional[int]) -> None:
+        if self.ui(chat_id)["then"] == "card":
+            self.screen_card(chat_id, msg_id)
+        else:
+            self.badge_picker(chat_id, msg_id)
+
+    def confirm(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+        u = self.ui(chat_id)
+        d = u["draft"]
+        date_ = parse_date(d.get("aktiv_seit") or "")
+        if not d.get("name") or not date_:
+            self.screen_card(chat_id, msg_id)
+            return
+        target = Target(d["name"], date_, dict(d.get("badges") or {}), d.get("followers"), d.get("online_ads"))
+        self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
+        if msg_id:
+            self.tg.edit(chat_id, msg_id, f"✅ Принято:\n\n{self.draft_text(target.to_dict())}")
+        self.tg.send(chat_id, self.submit_search(target), [[btn("📋 Задачи", "t:refresh")]])
+
+    def set_draft_from_target(self, chat_id: str, target: Target, title: str) -> None:
+        u = self.ui(chat_id)
+        u["draft"] = target.to_dict()
+        self.screen_card(chat_id, title=title)
+
+    # ------------------------------------------------------------------
+    # мониторинг
+    # ------------------------------------------------------------------
     def add_watch(self, uid: int, name: str = "") -> bool:
         with self.lock:
             key = str(uid)
@@ -1331,34 +1666,40 @@ class Bot:
         out: list[str] = []
         with self.lock:
             w = self.state["watch"].get(key)
-            if w is None:          # успели сделать /unwatch
+            if w is None:          # успели удалить
                 return []
+            manual = w.pop("manual", False)
+            label = w.get("name") or key
             if res.status != "ok" or not res.profile:
                 # ошибка/пустая страница: список «виденных» НЕ трогаем, иначе всё придёт как новое
                 w["fails"] = w.get("fails", 0) + 1
                 if res.status == "missing" and w["fails"] == 3:
-                    out.append(f"⚠️ Профиль {w.get('name') or key} не открывается (удалён?): "
-                               f"{PROFILE_URL.format(uid=key)}")
+                    out.append(f"⚠️ Профиль {label} не открывается (удалён?): {PROFILE_URL.format(uid=key)}")
+                elif manual:
+                    out.append(f"⚠️ {label}: не удалось открыть профиль ({res.error or res.status}), повторю позже.")
                 w["next"] = now + 5 * 60
                 return out
             prof = res.profile
             w["fails"] = 0
             w["name"] = w.get("name") or prof.name or ""
+            label = w["name"] or key
             current = prof.listings
             if w["seen"] is None:
                 w["seen"] = sorted(current)
-                out.append(f"📋 {w['name'] or key}: сейчас {len(current)} объявл. — запомнил, "
-                           f"буду присылать только новые.")
+                out.append(f"📋 {label}: сейчас {len(current)} объявл. — запомнил, буду присылать только новые.")
             else:
                 seen = set(w["seen"])
                 for ad_id, ad in current.items():
                     if ad_id in seen:
                         continue
-                    out.append(f"🆕 Новое объявление у {w['name'] or key}\n{ad['title'] or 'без названия'}"
+                    out.append(f"🆕 Новое объявление у {label}\n{ad['title'] or 'без названия'}"
                                + (f"\n💶 {ad['price']}" if ad.get("price") else "")
                                + f"\n{ad['url']}\nПрофиль: {PROFILE_URL.format(uid=key)}")
                 # объединяем, а не заменяем: временно скрытое объявление не придёт повторно
-                w["seen"] = sorted(seen | set(current), key=int)[-3000:]
+                w["seen"] = sorted(seen | set(current), key=lambda x: int(x) if x.isdigit() else 0)[-3000:]
+                if manual and not out:
+                    out.append(f"✅ {label}: новых объявлений нет (на странице {len(current)}).")
+            w["last"] = now
             lo, hi = self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"]
             w["next"] = now + random.uniform(lo, hi) * 60
         return out
@@ -1377,100 +1718,202 @@ class Bot:
             self.monitor_wakeup.wait(15)
             self.monitor_wakeup.clear()
 
-    # --- обработка входящих ---
-    def ask_confirm(self, chat_id: str, target: Target, source: str) -> None:
+    def request_check(self, keys: Iterable[str]) -> None:
         with self.lock:
-            self.state["pending"][chat_id] = target.to_dict()
-            self.save()
-        self.tg.send(chat_id, f"{source}:\n{target.summary()}\n\nВсё верно? Если нет — пришли исправленный текст.",
-                     [[{"text": "🔍 Искать", "callback_data": "go"}, {"text": "❌ Отмена", "callback_data": "cancel"}]])
+            for k in keys:
+                if k in self.state["watch"]:
+                    self.state["watch"][k]["next"] = 0
+                    self.state["watch"][k]["manual"] = True
+        self.monitor_wakeup.set()
 
-    def confirm(self, chat_id: str) -> None:
-        pend = self.state["pending"].pop(chat_id, None)
-        if not pend:
-            self.tg.send(chat_id, "Нечего подтверждать — пришли данные пользователя.")
-            return
-        if self.job_running():
-            self.state["pending"][chat_id] = pend
-            self.tg.send(chat_id, "Уже идёт поиск. /stop — остановить текущий, потом нажми «Искать» ещё раз.")
-            return
-        target = Target.from_dict(pend)
-        self.tg.send(chat_id, f"🚀 Запускаю поиск: {target.name}, {fmt_date(target.aktiv_seit)}")
-        self.start_job(Job(target=target.to_dict()))
+    def screen_monitor(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+        w = self.state["watch"]
+        lo, hi = self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"]
+        lines = [f"👁 Мониторинг новых объявлений (каждые {lo}–{hi} мин)"]
+        rows = []
+        for key, item in w.items():
+            label = item.get("name") or key
+            last = time.strftime("%H:%M", time.localtime(item["last"])) if item.get("last") else "ещё не было"
+            lines.append(f"• {label} (ID {key}) — объявл.: {len(item.get('seen') or [])}, проверка: {last}")
+            rows.append([btn(f"🔍 {label[:22]}", f"w:chk:{key}"), btn("🗑", f"w:del:{key}")])
+        if not w:
+            lines.append("Пока никого. Найденные поиском добавляются сами, или нажми «➕ Добавить».")
+        rows.append([btn("➕ Добавить", "w:new")] + ([btn("🔄 Проверить всех", "w:all")] if w else []))
+        rows.append([btn(f"⏱ Интервал: {lo}–{hi} мин", "w:int")])
+        self.show(chat_id, "\n".join(lines), rows, msg_id)
 
+    def screen_interval(self, chat_id: str, msg_id: Optional[int]) -> None:
+        cur = (self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"])
+        rows = [[btn(("✅ " if (lo, hi) == cur else "") + f"{lo}–{hi} мин", f"w:iv:{lo}:{hi}")
+                 for lo, hi in INTERVAL_CHOICES], [btn("⬅️ Назад", "w:list")]]
+        self.show(chat_id, "⏱ Как часто проверять новые объявления?\n(время каждый раз случайное в этих пределах)",
+                  rows, msg_id)
+
+    # ------------------------------------------------------------------
+    # прокси и скорость
+    # ------------------------------------------------------------------
+    def screen_proxy(self, chat_id: str, msg_id: Optional[int] = None, note: str = "") -> None:
+        proxy = self.cfg.get("proxy_url", "")
+        lines = ["🌐 Прокси и скорость", f"Прокси: {mask_proxy(proxy)}",
+                 f"Скорость: {self.cfg['requests_per_second']} запросов/сек, потоков {self.cfg['workers']}"]
+        paused = getattr(self.fetcher, "paused_for", lambda: 0)()
+        if paused:
+            lines.append(f"⛔ Сейчас автопауза из-за блокировки: ещё {paused // 60 + 1} мин")
+        if note:
+            lines.append("\n" + note)
+        rps = self.cfg["requests_per_second"]
+        rows = [[btn("🧪 Проверить", "p:test"), btn("✏️ Изменить", "p:set")]]
+        if proxy:
+            rows.append([btn("🚫 Работать без прокси", "p:off")])
+        rows.append([btn(("✅" if r == rps else "") + f"{r}/с", f"p:rps:{r}") for r in RPS_CHOICES])
+        self.show(chat_id, "\n".join(lines), rows, msg_id)
+
+    def set_proxy(self, url: str) -> None:
+        self.fetcher.set_proxy(url) if hasattr(self.fetcher, "set_proxy") else None
+        self.save_config(proxy_url=url)
+
+    def proxy_test(self, chat_id: str) -> None:
+        proxy = self.cfg.get("proxy_url", "")
+        s = requests.Session()
+        s.headers["User-Agent"] = USER_AGENTS[0]
+        if proxy:
+            s.proxies.update({"http": proxy, "https": proxy})
+        lines = [f"🧪 Проверка: {mask_proxy(proxy)}"]
+        try:
+            ip = s.get("https://api.ipify.org?format=json", timeout=20).json().get("ip")
+            lines.append(f"✅ Соединение есть, внешний IP: {ip}")
+        except Exception as exc:
+            lines.append(f"❌ Нет соединения через прокси: {type(exc).__name__}: {str(exc)[:120]}")
+            self.tg.send(chat_id, "\n".join(lines))
+            return
+        anchors = self.anchors.items()
+        uid = anchors[-1][0] if anchors else 46211501
+        try:
+            t0 = time.time()
+            r = s.get(PROFILE_URL.format(uid=uid), timeout=25)
+            ok = r.status_code == 200 and looks_like_profile(r.text)
+            lines.append(("✅ Kleinanzeigen открывается" if ok else f"⚠️ Kleinanzeigen ответил {r.status_code}"
+                          + (" (похоже на блокировку)" if r.status_code in (403, 429) or looks_blocked(r.text) else ""))
+                         + f", {time.time() - t0:.1f} с")
+        except Exception as exc:
+            lines.append(f"❌ Kleinanzeigen не открывается: {type(exc).__name__}")
+        self.tg.send(chat_id, "\n".join(lines), [[btn("🌐 Прокси", "p:menu")]])
+
+    # ------------------------------------------------------------------
+    # входящие: текст, фото, кнопки
+    # ------------------------------------------------------------------
     def handle_photo(self, chat_id: str, file_id: str) -> None:
         self.tg.send(chat_id, "📸 Распознаю скриншот…")
         try:
             text = ocr_image(self.tg.download(file_id), self.cfg["tesseract_cmd"])
         except Exception as exc:
-            self.tg.send(chat_id, f"Ошибка OCR: {exc}")
+            self.tg.send(chat_id, f"Ошибка распознавания: {exc}\nМожно ввести данные через «{M_SEARCH}».")
             return
         log.info("OCR:\n%s", text)
         name, d, badges, followers, online = parse_ocr_text(text)
-        if not name or not d:
-            self.tg.send(chat_id, "Не смог распознать имя или дату. Пришли данные текстом:\n"
-                                  f"Имя: {name or '?'}\nДата регистрации: {fmt_date(d) if d else '?'}\n"
-                                  f"Плашки: {badges_str(badges)}")
-            return
-        self.ask_confirm(chat_id, Target(name, d, badges, followers, online), "Распознано со скриншота")
+        with self.lock:
+            u = self.ui(chat_id)
+            u["draft"] = {"name": name, "aktiv_seit": fmt_date(d) if d else None, "badges": badges,
+                          "followers": followers, "online_ads": online}
+        self.screen_card(chat_id, title="📸 Распознано со скриншота")
 
     def handle_text(self, chat_id: str, text: str) -> None:
+        u = self.ui(chat_id)
+        menu = {M_SEARCH: lambda: self.start_wizard(chat_id), M_TASKS: lambda: self.screen_tasks(chat_id),
+                M_STATUS: lambda: self.screen_status(chat_id), M_RESULTS: lambda: self.screen_results(chat_id),
+                M_MONITOR: lambda: self.screen_monitor(chat_id), M_PROXY: lambda: self.screen_proxy(chat_id)}
+        if text in menu:
+            if u["step"] in ("proxy", "watch"):
+                u["step"] = None
+            menu[text]()
+            return
+        if text.startswith("/"):
+            self.handle_command(chat_id, text)
+            return
+        step = u["step"]
+        if step == "name":
+            u["draft"]["name"] = re.sub(r"\s+", " ", text).strip()[:60]
+            u["step"] = None
+            self.after_name(chat_id)
+        elif step == "date":
+            d = parse_date(text)
+            if not d:
+                self.tg.send(chat_id, "Не понял дату. Формат: 08.02.2017 — или выбери кнопками выше.")
+                return
+            u["draft"]["aktiv_seit"] = fmt_date(d)
+            self.after_date(chat_id, None)
+        elif step == "proxy":
+            self.handle_proxy_input(chat_id, text)
+        elif step == "watch":
+            m = re.search(r"userId=(\d+)|^\s*(\d+)\s*$", text)
+            if not m:
+                self.tg.send(chat_id, "Пришли ID (только цифры) или ссылку на профиль с userId=…")
+                return
+            u["step"] = None
+            if not self.add_watch(int(m.group(1) or m.group(2))):
+                self.tg.send(chat_id, "Этот профиль уже в мониторинге.")
+            self.screen_monitor(chat_id)
+        else:
+            target = parse_target_text(text)
+            if target:
+                self.set_draft_from_target(chat_id, target, "Понял так")
+            else:
+                self.tg.send(chat_id, "Не понял 🤔 Пользуйся кнопками меню или пришли скриншот профиля.\n"
+                                      "Текстом: Manuela 08.02.2017 top, sehr freundlich", keyboard=MAIN_KEYBOARD)
+
+    def start_wizard(self, chat_id: str) -> None:
+        self.state["ui"][chat_id] = {"step": None, "draft": {"badges": {}}, "then": "flow"}
+        self.ask_name(chat_id)
+
+    def handle_proxy_input(self, chat_id: str, text: str, message_id: Optional[int] = None) -> None:
+        url = normalize_proxy(text)
+        if message_id:
+            self.tg.delete(chat_id, message_id)   # не оставляем пароль прокси в переписке
+        if not url:
+            self.tg.send(chat_id, "Не похоже на прокси. Примеры:\nsocks5://логин:пароль@1.2.3.4:5000\n"
+                                  "логин:пароль@1.2.3.4:5000\n1.2.3.4:5000:логин:пароль",
+                         [[btn("❌ Отмена", "p:menu")]])
+            return
+        self.ui(chat_id)["step"] = None
+        self.set_proxy(url)
+        self.screen_proxy(chat_id, note="✅ Прокси сохранён (сообщение с паролем удалено). Нажми «🧪 Проверить».")
+
+    def handle_command(self, chat_id: str, text: str) -> None:
         cmd, _, arg = text.partition(" ")
         cmd = cmd.split("@")[0].lower()
         arg = arg.strip()
-        if cmd in ("/start", "/help", "/find"):
-            self.tg.send(chat_id, HELP)
-        elif cmd in ("/go", "/search"):
+        if cmd in ("/start", "/help", "/menu"):
+            self.ui(chat_id)["step"] = None
+            self.tg.send(chat_id, HELP, keyboard=MAIN_KEYBOARD)
+        elif cmd in ("/find", "/search"):
+            self.start_wizard(chat_id)
+        elif cmd == "/go":
             self.confirm(chat_id)
         elif cmd in ("/cancel", "/clear"):
-            self.state["pending"].pop(chat_id, None)
-            self.save()
-            self.tg.send(chat_id, "Ввод сброшен.")
+            self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
+            self.tg.send(chat_id, "Ввод сброшен.", keyboard=MAIN_KEYBOARD)
         elif cmd == "/status":
-            self.tg.send(chat_id, self.status_text())
-        elif cmd == "/pause":
-            self.pause_event.set()
-            self.tg.send(chat_id, "⏸ Пауза. /resume — продолжить.")
-        elif cmd == "/resume":
-            if self.job_running():
-                self.pause_event.clear()
-                self.tg.send(chat_id, "▶️ Продолжаю.")
-            elif self.job and self.job.status in ("stopped", "failed", "locating", "scanning") \
-                    and (self.job.cursor is None or self.job.cursor <= (self.job.last or 0)):
-                self.tg.send(chat_id, "▶️ Продолжаю сохранённый поиск с места остановки.")
-                self.job.message = ""
-                self.start_job(self.job)
-            else:
-                self.tg.send(chat_id, "Нечего продолжать.")
-        elif cmd == "/stop":
-            if self.job_running():
-                self.stop_event.set()
-                self.pause_event.clear()
-                self.tg.send(chat_id, "⏹ Останавливаю… (прогресс сохранится, /resume продолжит)")
-            else:
-                self.tg.send(chat_id, "Поиск не идёт.")
-        elif cmd == "/recheck":
-            self.recheck(chat_id)
-        elif cmd == "/watch":
+            self.screen_status(chat_id)
+        elif cmd in ("/tasks", "/pause", "/resume", "/stop", "/recheck"):
+            action = {"/pause": "pause", "/resume": "resume", "/stop": "stop", "/recheck": "recheck"}.get(cmd)
+            if action == "resume" and not self.job_running():
+                action = "continue"
+            if action:
+                self.task_action(chat_id, action)
+            self.screen_tasks(chat_id)
+        elif cmd in ("/results",):
+            self.screen_results(chat_id)
+        elif cmd in ("/watch", "/watchlist", "/unwatch", "/check"):
             m = re.search(r"userId=(\d+)|^(\d+)", arg)
-            if not m:
-                self.tg.send(chat_id, "Формат: /watch <user_id или ссылка на профиль>")
-            elif not self.add_watch(int(m.group(1) or m.group(2))):
-                self.tg.send(chat_id, "Уже в списке.")
-        elif cmd == "/unwatch":
-            with self.lock:
-                removed = self.state["watch"].pop(arg, None)
-                self.save()
-            self.tg.send(chat_id, "Удалён из мониторинга." if removed else "Такого ID нет в списке.")
-        elif cmd == "/watchlist":
-            w = self.state["watch"]
-            self.tg.send(chat_id, "\n".join(f"• {k} {v.get('name', '')} — {len(v.get('seen') or [])} объявл."
-                                            for k, v in w.items()) or "Список пуст.")
-        elif cmd == "/check":
-            for w in self.state["watch"].values():
-                w["next"] = 0
-            self.monitor_wakeup.set()
-            self.tg.send(chat_id, "Проверяю отслеживаемые аккаунты…")
+            if cmd == "/watch" and m:
+                self.add_watch(int(m.group(1) or m.group(2)))
+            elif cmd == "/unwatch" and arg in self.state["watch"]:
+                self.state["watch"].pop(arg)
+            elif cmd == "/check":
+                self.request_check(list(self.state["watch"]))
+            self.screen_monitor(chat_id)
+        elif cmd == "/proxy":
+            self.screen_proxy(chat_id)
         elif cmd in ("/anchor", "/add"):
             parts = arg.split()
             d = parse_date(parts[1]) if len(parts) == 2 else None
@@ -1480,34 +1923,153 @@ class Bot:
                 self.anchors.add(int(parts[0]), d)
                 self.anchors.flush()
                 self.tg.send(chat_id, f"Добавлено: {parts[0]} → {fmt_date(d)} (всего {len(self.anchors):,})")
-        elif cmd.startswith("/"):
-            self.tg.send(chat_id, "Не знаю такую команду. /help")
         else:
-            target = parse_target_text(text)
-            if target:
-                self.ask_confirm(chat_id, target, "Понял так")
-            else:
-                self.tg.send(chat_id, "Не понял. Нужны минимум имя и дата регистрации. Пример:\n"
-                                      "Имя: Manuela\nДата регистрации: 08.02.2017\nПлашки: TOP Zufriedenheit")
+            self.tg.send(chat_id, "Не знаю такую команду — пользуйся кнопками меню.", keyboard=MAIN_KEYBOARD)
 
-    def recheck(self, chat_id: str) -> None:
-        if self.job_running():
-            self.tg.send(chat_id, "Сначала дождись окончания или /stop.")
-            return
-        if not self.job or not self.job.error_ids:
-            self.tg.send(chat_id, "ID с ошибками нет.")
-            return
+    def task_action(self, chat_id: str, action: str) -> None:
         job = self.job
-        self.tg.send(chat_id, f"🔁 Перепроверяю {len(job.error_ids)} ID…")
-        self.stop_event.clear()
+        if action == "pause" and self.job_running():
+            self.pause_event.set()
+        elif action == "resume" and self.job_running():
+            self.pause_event.clear()
+        elif action == "stop" and self.job_running():
+            self.stop_event.set()
+            self.pause_event.clear()
+            self.tg.send(chat_id, "⏹ Останавливаю… прогресс сохранится, потом можно «▶️ Продолжить поиск».")
+        elif action == "continue" and job and not self.job_running():
+            job.message = ""
+            self.start_job(job)
+        elif action == "recheck" and job and job.error_ids and not self.job_running():
+            self.tg.send(chat_id, f"🔁 Перепроверяю {len(job.error_ids)} ID…")
+            self.stop_event.clear()
 
-        def _run():
-            Scanner(self.fetcher, self.cfg, self.stop_event, self.pause_event, self._on_match, self.save).recheck(job)
-            self.save()
-            self.broadcast(self.report(job))
+            def _run():
+                Scanner(self.fetcher, self.cfg, self.stop_event, self.pause_event, self._on_match,
+                        self.save).recheck(job)
+                self._archive(job)
+                self.save()
+                self.broadcast(self.report(job), self._watch_buttons(job.matches))
+                self._start_next_from_queue()
 
-        self.job_thread = threading.Thread(target=_run, name="recheck", daemon=True)
-        self.job_thread.start()
+            self.job_thread = threading.Thread(target=_run, name="recheck", daemon=True)
+            self.job_thread.start()
+
+    def handle_callback(self, chat_id: str, data: str, msg_id: int) -> None:
+        u = self.ui(chat_id)
+        parts = data.split(":")
+        kind = parts[0]
+        if kind == "noop":
+            return
+        # --- карточка поиска ---
+        if kind == "c":
+            act = parts[1]
+            if act == "new":
+                self.start_wizard(chat_id)
+            elif act == "go":
+                self.confirm(chat_id, msg_id)
+            elif act == "cancel":
+                self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
+                self.tg.edit(chat_id, msg_id, "❌ Отменено.")
+            elif act == "name":
+                u["then"] = "card"
+                self.ask_name(chat_id, msg_id)
+            elif act == "date":
+                u["then"] = "card"
+                self.year_picker(chat_id, msg_id)
+            elif act == "badges":
+                u["then"] = "card"
+                self.badge_picker(chat_id, msg_id)
+        # --- выбор даты ---
+        elif kind == "d":
+            if len(parts) == 2:
+                self.year_picker(chat_id, msg_id)
+            elif parts[1] == "y":
+                self.month_picker(chat_id, int(parts[2]), msg_id)
+            elif parts[1] == "m":
+                self.day_picker(chat_id, int(parts[2]), int(parts[3]), msg_id)
+            elif parts[1] == "d":
+                u["draft"]["aktiv_seit"] = fmt_date(date(int(parts[2]), int(parts[3]), int(parts[4])))
+                self.after_date(chat_id, msg_id)
+        # --- плашки ---
+        elif kind == "b":
+            badges = u["draft"].setdefault("badges", {})
+            if parts[1] == "done":
+                self.screen_card(chat_id, msg_id)
+                return
+            cat, _ = BADGE_PICKER[parts[1]]
+            key = parts[2]
+            if key == "x":
+                badges.pop(cat, None)
+            else:
+                label = BADGE_LABELS[cat]["" if key == "-" else key]
+                if badges.get(cat) == label:
+                    badges.pop(cat)        # повторное нажатие снимает отметку
+                else:
+                    badges[cat] = label
+            self.badge_picker(chat_id, msg_id)
+        # --- задачи / статус / результаты ---
+        elif kind == "t":
+            if parts[1] == "del":
+                i = int(parts[2])
+                with self.lock:
+                    if 0 <= i < len(self.state["queue"]):
+                        self.state["queue"].pop(i)
+            elif parts[1] != "refresh":
+                self.task_action(chat_id, parts[1])
+                time.sleep(0.3)   # дать потоку поиска обновить статус
+            self.screen_tasks(chat_id, msg_id)
+        elif kind == "s":
+            self.screen_status(chat_id, msg_id)
+        elif kind == "r":
+            self.screen_results(chat_id, msg_id)
+        # --- мониторинг ---
+        elif kind == "w":
+            act = parts[1]
+            if act == "add":
+                if not self.add_watch(int(parts[2])):
+                    self.tg.send(chat_id, "Этот профиль уже в мониторинге.")
+                return
+            if act == "new":
+                u["step"] = "watch"
+                self.show(chat_id, "➕ Пришли ID пользователя или ссылку на профиль (…userId=12345)",
+                          [[btn("⬅️ Назад", "w:list")]], msg_id)
+                return
+            if act == "del":
+                with self.lock:
+                    self.state["watch"].pop(parts[2], None)
+            elif act == "chk":
+                self.request_check([parts[2]])
+                self.tg.send(chat_id, "🔍 Проверяю…")
+            elif act == "all":
+                self.request_check(list(self.state["watch"]))
+                self.tg.send(chat_id, "🔍 Проверяю всех…")
+            elif act == "int":
+                self.screen_interval(chat_id, msg_id)
+                return
+            elif act == "iv":
+                self.save_config(monitor_minutes_min=int(parts[2]), monitor_minutes_max=int(parts[3]))
+            if act in ("list", "del", "iv"):
+                u["step"] = None
+            self.screen_monitor(chat_id, msg_id)
+        # --- прокси ---
+        elif kind == "p":
+            act = parts[1]
+            if act == "set":
+                u["step"] = "proxy"
+                self.show(chat_id, "✏️ Пришли прокси одним сообщением, например:\n"
+                                   "socks5://логин:пароль@1.2.3.4:5000\n"
+                                   "(сообщение с паролем я сразу удалю из чата)", [[btn("❌ Отмена", "p:menu")]], msg_id)
+                return
+            if act == "off":
+                self.set_proxy("")
+            elif act == "rps":
+                self.save_config(requests_per_second=int(parts[2]))
+            elif act == "test":
+                self.tg.send(chat_id, "🧪 Проверяю прокси…")
+                threading.Thread(target=self.proxy_test, args=(chat_id,), daemon=True).start()
+                return
+            u["step"] = None
+            self.screen_proxy(chat_id, msg_id)
 
     def handle_update(self, upd: dict) -> None:
         if "callback_query" in upd:
@@ -1516,16 +2078,9 @@ class Bot:
             self.tg.call("answerCallbackQuery", callback_query_id=cq["id"])
             if chat_id not in self.cfg["allowed_chat_ids"]:
                 return
-            data = cq.get("data", "")
-            if data == "go":
-                self.confirm(chat_id)
-            elif data == "cancel":
-                self.state["pending"].pop(chat_id, None)
-                self.tg.send(chat_id, "Отменено.")
-            elif data.startswith("watch:"):
-                if not self.add_watch(int(data.split(":", 1)[1])):
-                    self.tg.send(chat_id, "Уже в списке.")
-            self.save()
+            with self.lock:
+                self.handle_callback(chat_id, cq.get("data", ""), cq["message"]["message_id"])
+                self.save()
             return
         msg = upd.get("message")
         if not msg:
@@ -1534,8 +2089,8 @@ class Bot:
         if chat_id not in self.cfg["allowed_chat_ids"]:
             log.warning("Сообщение от чужого chat_id %s — игнор", chat_id)
             if not self.cfg["allowed_chat_ids"]:
-                self.tg.send(chat_id, f"Твой chat_id: {chat_id}\nДобавь его в allowed_chat_ids в config.json "
-                                      f"и перезапусти бота.")
+                self.tg.send(chat_id, f"Твой chat_id: {chat_id}\nЗапусти на компьютере "
+                                      f"«python kleinanzeigen_bot.py --setup» и впиши его.")
             return
         if msg.get("photo"):
             threading.Thread(target=self.handle_photo, args=(chat_id, msg["photo"][-1]["file_id"]),
@@ -1544,22 +2099,36 @@ class Bot:
             threading.Thread(target=self.handle_photo, args=(chat_id, msg["document"]["file_id"]),
                              daemon=True).start()
         elif "text" in msg:
-            self.handle_text(chat_id, msg["text"].strip())
+            with self.lock:
+                if self.ui(chat_id)["step"] == "proxy" and not msg["text"].startswith("/") \
+                        and msg["text"] not in (M_SEARCH, M_TASKS, M_STATUS, M_RESULTS, M_MONITOR, M_PROXY):
+                    self.handle_proxy_input(chat_id, msg["text"], msg.get("message_id"))
+                else:
+                    self.handle_text(chat_id, msg["text"].strip())
+                self.save()
 
-    # --- главный цикл ---
+    # ------------------------------------------------------------------
+    # главный цикл
+    # ------------------------------------------------------------------
     def run(self) -> None:
         me = self.tg.call("getMe")
         if not me:
             sys.exit("❌ Telegram не отвечает или неверный telegram_token")
         log.info("Бот @%s запущен. Разрешённые чаты: %s", me.get("username"), self.cfg["allowed_chat_ids"] or "—")
         if self.cfg.get("proxy_url"):
-            log.info("Прокси для сайта: включён")
+            log.info("Прокси для сайта: %s", mask_proxy(self.cfg["proxy_url"]))
+        self.tg.call("setMyCommands", commands=[{"command": "start", "description": "Меню и помощь"},
+                                                {"command": "status", "description": "Статус"},
+                                                {"command": "cancel", "description": "Сбросить ввод"}])
         threading.Thread(target=self.monitor_loop, name="monitor", daemon=True).start()
+        for chat_id in self.cfg["allowed_chat_ids"]:
+            self.tg.send(chat_id, "🤖 Бот запущен. Меню — кнопками внизу, или пришли скриншот профиля.",
+                         keyboard=MAIN_KEYBOARD)
         if self.job and self.job.status in ("locating", "scanning"):
             self.broadcast("♻️ Бот перезапущен — продолжаю незаконченный поиск.")
             self.start_job(self.job)
         else:
-            self.broadcast("🤖 Бот запущен. /help — инструкция.")
+            self._start_next_from_queue()
         offset = self.state.get("offset")
         while True:
             try:
@@ -1621,7 +2190,7 @@ def main() -> None:
     if not TOKEN_RE.match(cfg["telegram_token"] or ""):
         fail("❌ В config.json нет правильного telegram_token. Запусти: python kleinanzeigen_bot.py --setup")
     setup_logging((BASE_DIR / cfg["data_dir"]).resolve())
-    Bot(cfg).run()
+    Bot(cfg, cfg_path).run()
 
 
 TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
