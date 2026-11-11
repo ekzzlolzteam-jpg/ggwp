@@ -81,6 +81,7 @@ DEFAULT_CONFIG: dict = {
     "auto_watch_on_match": True,     # «✅ Это он» или единственное точное совпадение → мониторинг
     "max_parallel_searches": 5,      # сколько поисков идут одновременно (делят общую скорость)
     # --- Мониторинг ---
+    "monitor_every_check": False,    # True — сообщение о КАЖДОЙ проверке (с заметкой), даже без новых
     "monitor_minutes_min": 10,
     "monitor_minutes_max": 30,
     # --- Прочее ---
@@ -871,6 +872,7 @@ class Target:
     followers: Optional[int] = None
     online_ads: Optional[int] = None
     total_ads: Optional[int] = None
+    note: str = ""                       # заметка: чей это аккаунт
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -880,7 +882,8 @@ class Target:
     @classmethod
     def from_dict(cls, d: dict) -> "Target":
         return cls(name=d["name"], aktiv_seit=parse_date(d["aktiv_seit"]), badges=d.get("badges") or {},
-                   followers=d.get("followers"), online_ads=d.get("online_ads"), total_ads=d.get("total_ads"))
+                   followers=d.get("followers"), online_ads=d.get("online_ads"), total_ads=d.get("total_ads"),
+                   note=d.get("note") or "")
 
     def summary(self) -> str:
         lines = [f"Имя: {self.name}", f"Дата регистрации: {fmt_date(self.aktiv_seit)}",
@@ -889,7 +892,13 @@ class Target:
             lines.append(f"Подписчики: {self.followers}")
         if self.online_ads is not None:
             lines.append(f"Объявления онлайн: {self.online_ads}")
+        if self.note:
+            lines.append(f"Заметка: {self.note}")
         return "\n".join(lines)
+
+
+def note_suffix(note: Optional[str]) -> str:
+    return f"\n📝 {note}" if note else ""
 
 
 @dataclass
@@ -1097,6 +1106,7 @@ FIELD_KEYS = {
     "badges": ("плашки", "плашка", "badges", "бейджи", "значки"),
     "followers": ("подписчики", "follower", "followers"),
     "online_ads": ("объявления онлайн", "объявления", "anzeigen online", "anzeigen"),
+    "note": ("заметка", "note", "комментарий", "чей", "подпись"),
 }
 EMPTY_VALUES = {"", "-", "—", "нет", "не найдено", "не найдены", "none"}
 
@@ -1138,7 +1148,8 @@ def parse_target_text(text: str) -> Optional[Target]:
         if not d or fields["name"].lower() in EMPTY_VALUES:
             return None
         return Target(name=fields["name"], aktiv_seit=d, badges=_opt_badges(fields.get("badges")),
-                      followers=_opt_int(fields.get("followers")), online_ads=_opt_int(fields.get("online_ads")))
+                      followers=_opt_int(fields.get("followers")), online_ads=_opt_int(fields.get("online_ads")),
+                      note=(fields.get("note") or "").strip()[:200])
     if len(lines) >= 2 and parse_date(lines[1]) and not parse_date(lines[0]):
         rest = lines[2:] + [None] * 3
         return Target(name=lines[0], aktiv_seit=parse_date(lines[1]), badges=_opt_badges(rest[0]),
@@ -1326,13 +1337,15 @@ HELP = f"""🔎 Поиск пользователя Kleinanzeigen
 {M_TASKS} — идущие поиски: ⏸ пауза и ⏹ стоп для каждого
 {M_STATUS} — прогресс и скорость
 {M_RESULTS} — что найдено в идущих поисках
-{M_MONITOR} — слежка за новыми объявлениями
+{M_MONITOR} — слежка за новыми объявлениями, 📝 заметки «чей аккаунт»
 {M_PROXY} — прокси и скорость запросов
 
 📸 В любой момент можно прислать СКРИНШОТ профиля (можно сразу несколько) —
 каждый станет отдельным поиском, они идут одновременно.
 Поиск перебирает день до конца и сообщает о КАЖДОМ совпадении.
 Уверен, что нашёлся нужный? Жми «✅ Это он» под сообщением — поиск остановится.
+📝 На карточке перед поиском можно добавить заметку (чей аккаунт) — она будет
+в каждом уведомлении поиска и мониторинга.
 Текстом тоже можно: Manuela 08.02.2017 top, sehr freundlich"""
 
 MONTHS_RU = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"]
@@ -1346,6 +1359,15 @@ RPS_CHOICES = (4, 8, 12, 15, 20)
 INTERVAL_CHOICES = ((5, 15), (10, 30), (30, 60), (60, 120))
 JOB_STATUS_RU = {"locating": "ищу диапазон", "scanning": "перебор", "done": "завершён",
                  "stopped": "остановлен", "failed": "ошибка", "queued": "в очереди"}
+
+
+def parse_watch_input(text: str) -> tuple[Optional[int], str]:
+    """«12345 Петя, Audi» / «https://…userId=12345 Петя» → (12345, "Петя, Audi")."""
+    text = text.strip()
+    m = re.match(r"^\S*?userId=(\d+)\S*\s*(.*)$", text, re.S) or re.match(r"^(\d{3,})\b\s*(.*)$", text, re.S)
+    if not m:
+        return None, ""
+    return int(m.group(1)), re.sub(r"\s+", " ", m.group(2)).strip(" -—:,")[:200]
 
 
 def btn(text: str, data: str) -> dict:
@@ -1401,6 +1423,7 @@ class Bot:
         self.lock = threading.RLock()
         self.state = self._load_state()
         self.runs: dict[int, SearchRun] = {}    # идущие и ждущие поиски (только в памяти)
+        self.notes_by_uid: dict[int, str] = {}  # заметка найденного аккаунта — для кнопки «👁 Следить»
         self.next_num = 1
         # общий пул потоков для всех поисков: лимит скорости всё равно общий
         self.pool = ThreadPoolExecutor(max_workers=64, thread_name_prefix="fetch")
@@ -1512,7 +1535,10 @@ class Bot:
         job = run.job
         prog = f"\nПоиск #{run.num} продолжается: проверено {job.checked / job.total * 100:.0f}% " \
                f"— если это он, останови кнопкой ниже." if job.total else ""
-        self.broadcast(f"{head} (поиск #{run.num})\n{m.name} (ID {m.user_id})\n{m.url}{notes}{prog}",
+        if run.target.note:
+            self.notes_by_uid[m.user_id] = run.target.note
+        self.broadcast(f"{head} (поиск #{run.num}){note_suffix(run.target.note)}\n"
+                       f"{m.name} (ID {m.user_id})\n{m.url}{notes}{prog}",
                        [[btn(f"✅ Это он — остановить поиск #{run.num}", f"j:ok:{run.num}:{m.user_id}")],
                         [btn("👁 Следить за объявлениями", f"w:add:{m.user_id}")]])
 
@@ -1550,9 +1576,9 @@ class Bot:
             exact = [m for m in job.matches if m["level"] == "exact"]
             if run.confirmed:
                 name = next((m["name"] for m in job.matches if m["user_id"] == run.confirmed), "")
-                self.add_watch(run.confirmed, name)
+                self.add_watch(run.confirmed, name, note=run.target.note)
             elif job.status == "done" and len(exact) == 1:
-                self.add_watch(exact[0]["user_id"], exact[0]["name"])
+                self.add_watch(exact[0]["user_id"], exact[0]["name"], note=run.target.note)
         self._start_queued()
 
     def report(self, run: SearchRun) -> str:
@@ -1566,7 +1592,8 @@ class Bot:
             head = f"⏹ Поиск #{run.num} остановлен"
         else:
             head = f"❌ Поиск #{run.num}: ошибка — {job.message}"
-        lines = [f"{head} ({mins:.0f} мин)", f"Цель: {t.name}, {fmt_date(t.aktiv_seit)}, плашки: {badges_str(t.badges)}"]
+        lines = [f"{head} ({mins:.0f} мин){note_suffix(t.note)}",
+                 f"Цель: {t.name}, {fmt_date(t.aktiv_seit)}, плашки: {badges_str(t.badges)}"]
         if job.first is not None:
             lines.append(f"Диапазон: {job.first:,}–{job.last:,}; проверено {job.checked:,}/{job.total:,} "
                          f"(профилей {job.profiles:,}, пустых {job.missing:,}, не открылись {len(job.error_ids)})")
@@ -1721,6 +1748,7 @@ class Bot:
             lines.append(f"Подписчики: {d['followers']}")
         if d.get("online_ads") is not None:
             lines.append(f"Объявления онлайн: {d['online_ads']}")
+        lines.append(f"📝 Заметка: {d.get('note') or '— (нажми «📝 Заметка», чтобы подписать, чей аккаунт)'}")
         return "\n".join(lines)
 
     def screen_card(self, chat_id: str, msg_id: Optional[int] = None, title: str = "Проверь данные") -> None:
@@ -1730,10 +1758,19 @@ class Bot:
         ready = d.get("name") and d.get("aktiv_seit")
         rows = [[btn("🔍 Искать", "c:go")]] if ready else []
         rows += [[btn("✏️ Имя", "c:name"), btn("📅 Дата", "c:date"), btn("🏷 Плашки", "c:badges")],
-                 [btn("❌ Отмена", "c:cancel")]]
+                 [btn("📝 Заметка", "c:note"), btn("❌ Отмена", "c:cancel")]]
         hint = "\n\nВсё верно? Жми «🔍 Искать» или исправь кнопками." if ready else \
             "\n\nНе хватает имени или даты — задай кнопками ниже."
         self.show(chat_id, f"{title}:\n\n{self.draft_text(d)}{hint}", rows, msg_id)
+
+    def ask_note(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+        u = self.ui(chat_id)
+        u["step"] = "note"
+        cur = u["draft"].get("note")
+        rows = [[btn("🗑 Без заметки", "c:nonote")]] if cur else []
+        self.show(chat_id, "📝 Напиши заметку к аккаунту — чей он, зачем ищем (например: «Петя, Audi A4»).\n"
+                           "Она будет в каждом уведомлении поиска и мониторинга."
+                  + (f"\n\nСейчас: {cur}" if cur else ""), rows + [[btn("⬅️ Назад", "c:back")]], msg_id)
 
     def ask_name(self, chat_id: str, msg_id: Optional[int] = None) -> None:
         u = self.ui(chat_id)
@@ -1794,7 +1831,8 @@ class Bot:
         if not d.get("name") or not date_:
             self.screen_card(chat_id, msg_id)
             return
-        target = Target(d["name"], date_, dict(d.get("badges") or {}), d.get("followers"), d.get("online_ads"))
+        target = Target(d["name"], date_, dict(d.get("badges") or {}), d.get("followers"), d.get("online_ads"),
+                        note=(d.get("note") or "").strip())
         self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
         if msg_id:
             self.tg.edit(chat_id, msg_id, f"✅ Принято:\n\n{self.draft_text(target.to_dict())}")
@@ -1808,17 +1846,32 @@ class Bot:
     # ------------------------------------------------------------------
     # мониторинг
     # ------------------------------------------------------------------
-    def add_watch(self, uid: int, name: str = "") -> bool:
+    def add_watch(self, uid: int, name: str = "", note: str = "") -> bool:
         with self.lock:
             key = str(uid)
             if key in self.state["watch"]:
+                if note and not self.state["watch"][key].get("note"):
+                    self.set_watch_note(key, note)
                 return False
-            self.state["watch"][key] = {"name": name, "seen": None, "next": 0, "fails": 0}
+            self.state["watch"][key] = {"name": name, "note": note, "seen": None, "next": 0, "fails": 0}
             self.save()
         self.monitor_wakeup.set()
-        self.broadcast(f"👁 Слежу за {name or uid}: {PROFILE_URL.format(uid=uid)}\n"
-                       f"Проверка каждые {self.cfg['monitor_minutes_min']}–{self.cfg['monitor_minutes_max']} мин.")
+        self.broadcast(f"👁 Слежу за {name or uid}{note_suffix(note)}\n{PROFILE_URL.format(uid=uid)}\n"
+                       f"Проверка каждые {self.cfg['monitor_minutes_min']}–{self.cfg['monitor_minutes_max']} мин."
+                       + ("" if note else "\nЧтобы подписать, чей это аккаунт: «👁 Мониторинг» → 📝."))
         return True
+
+    def set_watch_note(self, key: str, note: str) -> None:
+        with self.lock:
+            if key in self.state["watch"]:
+                self.state["watch"][key]["note"] = note
+                self.save()
+
+    @staticmethod
+    def watch_label(key: str, w: dict) -> str:
+        """«Arne Schwarzmann (ID 123) — 📝 Петя, Audi A4» — заметка видна в каждом сообщении."""
+        return f"{w.get('name') or 'ID ' + key}" + (f" (ID {key})" if w.get("name") else "") + \
+            (f" — 📝 {w['note']}" if w.get("note") else "")
 
     def check_watch(self, key: str) -> list[str]:
         """Проверяет один аккаунт. Возвращает сообщения для отправки."""
@@ -1832,7 +1885,7 @@ class Bot:
             if w is None:          # успели удалить
                 return []
             manual = w.pop("manual", False)
-            label = w.get("name") or key
+            label = self.watch_label(key, w)
             if res.status != "ok" or not res.profile:
                 # ошибка/пустая страница: список «виденных» НЕ трогаем, иначе всё придёт как новое
                 w["fails"] = w.get("fails", 0) + 1
@@ -1845,7 +1898,7 @@ class Bot:
             prof = res.profile
             w["fails"] = 0
             w["name"] = w.get("name") or prof.name or ""
-            label = w["name"] or key
+            label = self.watch_label(key, w)
             current = prof.listings
             if w["seen"] is None:
                 w["seen"] = sorted(current)
@@ -1855,12 +1908,12 @@ class Bot:
                 for ad_id, ad in current.items():
                     if ad_id in seen:
                         continue
-                    out.append(f"🆕 Новое объявление у {label}\n{ad['title'] or 'без названия'}"
+                    out.append(f"🆕 Новое объявление у {label}\n\n{ad['title'] or 'без названия'}"
                                + (f"\n💶 {ad['price']}" if ad.get("price") else "")
                                + f"\n{ad['url']}\nПрофиль: {PROFILE_URL.format(uid=key)}")
                 # объединяем, а не заменяем: временно скрытое объявление не придёт повторно
                 w["seen"] = sorted(seen | set(current), key=lambda x: int(x) if x.isdigit() else 0)[-3000:]
-                if manual and not out:
+                if (manual or self.cfg.get("monitor_every_check")) and not out:
                     out.append(f"✅ {label}: новых объявлений нет (на странице {len(current)}).")
             w["last"] = now
             lo, hi = self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"]
@@ -1895,14 +1948,20 @@ class Bot:
         lines = [f"👁 Мониторинг новых объявлений (каждые {lo}–{hi} мин)"]
         rows = []
         for key, item in w.items():
-            label = item.get("name") or key
             last = time.strftime("%H:%M", time.localtime(item["last"])) if item.get("last") else "ещё не было"
-            lines.append(f"• {label} (ID {key}) — объявл.: {len(item.get('seen') or [])}, проверка: {last}")
-            rows.append([btn(f"🔍 {label[:22]}", f"w:chk:{key}"), btn("🗑", f"w:del:{key}")])
+            lines.append(f"\n• {self.watch_label(key, item)}\n   объявл.: {len(item.get('seen') or [])}, "
+                         f"последняя проверка: {last}")
+            short = item.get("note") or item.get("name") or key
+            rows.append([btn(f"🔍 {short[:24]}", f"w:chk:{key}"), btn("📝", f"w:note:{key}"),
+                         btn("🗑", f"w:del:{key}")])
         if not w:
             lines.append("Пока никого. Найденные поиском добавляются сами, или нажми «➕ Добавить».")
+        else:
+            lines.append("\n📝 — подписать/изменить заметку (чей аккаунт), 🗑 — убрать из мониторинга.")
         rows.append([btn("➕ Добавить", "w:new")] + ([btn("🔄 Проверить всех", "w:all")] if w else []))
-        rows.append([btn(f"⏱ Интервал: {lo}–{hi} мин", "w:int")])
+        every = self.cfg.get("monitor_every_check")
+        rows.append([btn(f"⏱ Интервал: {lo}–{hi} мин", "w:int"),
+                     btn("🔔 О каждой проверке: " + ("вкл" if every else "выкл"), "w:every")])
         self.show(chat_id, "\n".join(lines), rows, msg_id)
 
     def screen_interval(self, chat_id: str, msg_id: Optional[int]) -> None:
@@ -2020,14 +2079,27 @@ class Bot:
             self.after_date(chat_id, None)
         elif step == "proxy":
             self.handle_proxy_input(chat_id, text)
+        elif step == "note":
+            u["draft"]["note"] = re.sub(r"\s+", " ", text).strip()[:200]
+            self.screen_card(chat_id)
         elif step == "watch":
-            m = re.search(r"userId=(\d+)|^\s*(\d+)\s*$", text)
-            if not m:
-                self.tg.send(chat_id, "Пришли ID (только цифры) или ссылку на профиль с userId=…")
+            uid, note = parse_watch_input(text)
+            if not uid:
+                self.tg.send(chat_id, "Пришли ID (цифры) или ссылку на профиль с userId=…, "
+                                      "а после пробела — заметку, например:\n12345678 Петя, Audi A4")
                 return
             u["step"] = None
-            if not self.add_watch(int(m.group(1) or m.group(2))):
-                self.tg.send(chat_id, "Этот профиль уже в мониторинге.")
+            if not self.add_watch(uid, note=note):
+                if note:
+                    self.set_watch_note(str(uid), note)
+                self.tg.send(chat_id, "Этот профиль уже в мониторинге" + (" — заметку обновил." if note else "."))
+            self.screen_monitor(chat_id)
+        elif step == "watch_note":
+            key = u.pop("watch_key", None)
+            u["step"] = None
+            if key:
+                note = "" if text.strip() in ("-", "—") else re.sub(r"\s+", " ", text).strip()[:200]
+                self.set_watch_note(key, note)
             self.screen_monitor(chat_id)
         else:
             target = parse_target_text(text)
@@ -2085,9 +2157,9 @@ class Bot:
         elif cmd in ("/results",):
             self.screen_results(chat_id)
         elif cmd in ("/watch", "/watchlist", "/unwatch", "/check"):
-            m = re.search(r"userId=(\d+)|^(\d+)", arg)
-            if cmd == "/watch" and m:
-                self.add_watch(int(m.group(1) or m.group(2)))
+            uid, note = parse_watch_input(arg)
+            if cmd == "/watch" and uid:
+                self.add_watch(uid, note=note)
             elif cmd == "/unwatch" and arg in self.state["watch"]:
                 self.state["watch"].pop(arg)
             elif cmd == "/check":
@@ -2132,6 +2204,13 @@ class Bot:
             elif act == "badges":
                 u["then"] = "card"
                 self.badge_picker(chat_id, msg_id)
+            elif act == "note":
+                self.ask_note(chat_id, msg_id)
+            elif act == "nonote":
+                u["draft"].pop("note", None)
+                self.screen_card(chat_id, msg_id)
+            elif act == "back":
+                self.screen_card(chat_id, msg_id)
         # --- выбор даты ---
         elif kind == "d":
             if len(parts) == 2:
@@ -2178,14 +2257,30 @@ class Bot:
         elif kind == "w":
             act = parts[1]
             if act == "add":
-                if not self.add_watch(int(parts[2])):
+                uid = int(parts[2])
+                if not self.add_watch(uid, note=self.notes_by_uid.get(uid, "")):
                     self.tg.send(chat_id, "Этот профиль уже в мониторинге.")
                 return
             if act == "new":
                 u["step"] = "watch"
-                self.show(chat_id, "➕ Пришли ID пользователя или ссылку на профиль (…userId=12345)",
+                self.show(chat_id, "➕ Пришли ID пользователя или ссылку на профиль (…userId=12345).\n"
+                                   "Через пробел можно сразу заметку — чей аккаунт:\n12345678 Петя, Audi A4",
                           [[btn("⬅️ Назад", "w:list")]], msg_id)
                 return
+            if act == "note":
+                key = parts[2]
+                item = self.state["watch"].get(key)
+                if item is None:
+                    self.screen_monitor(chat_id, msg_id)
+                    return
+                u["step"], u["watch_key"] = "watch_note", key
+                cur = item.get("note")
+                self.show(chat_id, f"📝 Заметка к {item.get('name') or key} (ID {key}) — чей это аккаунт?\n"
+                                   + (f"Сейчас: {cur}\n" if cur else "") + "Напиши новую («-» — убрать).",
+                          [[btn("⬅️ Назад", "w:list")]], msg_id)
+                return
+            if act == "every":
+                self.save_config(monitor_every_check=not self.cfg.get("monitor_every_check"))
             if act == "del":
                 with self.lock:
                     self.state["watch"].pop(parts[2], None)
@@ -2200,7 +2295,7 @@ class Bot:
                 return
             elif act == "iv":
                 self.save_config(monitor_minutes_min=int(parts[2]), monitor_minutes_max=int(parts[3]))
-            if act in ("list", "del", "iv"):
+            if act in ("list", "del", "iv", "every"):
                 u["step"] = None
             self.screen_monitor(chat_id, msg_id)
         # --- прокси ---

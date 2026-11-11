@@ -411,7 +411,8 @@ class TestRealOCR(unittest.TestCase):
 # =====================================================================
 # Кнопочный интерфейс бота — сценарий целиком
 # =====================================================================
-class TestButtonsUI(unittest.TestCase):
+class UIBase(unittest.TestCase):
+    """Бот с фейковым сайтом и фейковым Telegram + помощники «написать», «нажать»."""
     CHAT = "42"
 
     def setUp(self):
@@ -461,6 +462,8 @@ class TestButtonsUI(unittest.TestCase):
         self.bot.handle_update({"update_id": self.uid, "callback_query": {
             "id": "c", "data": "c:go", "message": {"chat": {"id": int(self.CHAT)}, "message_id": 77}}})
 
+
+class TestButtonsUI(UIBase):
     def test_full_search_by_buttons(self):
         d = date(2016, 9, 9)
         ids = self.site.ids_on(d)
@@ -731,3 +734,80 @@ class TestSpeed(unittest.TestCase):
                          '"day_cache_days": 30}', encoding="utf-8")
             cfg = kb.load_config(p)
             self.assertNotIn("found_accounts", cfg)
+
+
+class TestNotes(UIBase):
+    """Заметка «чей аккаунт»: карточка → поиск → «Это он» → мониторинг → новое объявление."""
+
+    def test_note_goes_from_card_to_monitoring(self):
+        d = date(2016, 10, 1)
+        ids = self.site.ids_on(d)
+        self.site.special[ids[50]] = kb.Profile(ids[50], "Willi", d, {})
+        self.text("Willi 01.10.2016")
+        self.press("📝 Заметка")
+        self.text("Петя, Audi A4")
+        card = self.tg.sent[-1]
+        self.assertIn("📝 Заметка: Петя, Audi A4", card)
+        self.press("Искать")
+        for _ in range(500):
+            if any("НАЙДЕН" in t for t in self.tg.sent):
+                break
+            time.sleep(0.01)
+        note_msg = next(t for t in self.tg.sent if "НАЙДЕН" in t)
+        self.assertIn("📝 Петя, Audi A4", note_msg)
+        self.wait_all()
+        report = next(t for t in self.tg.sent if "Поиск #1 завершён" in t)
+        self.assertIn("📝 Петя, Audi A4", report)
+        key = str(ids[50])
+        self.assertEqual(self.bot.state["watch"][key]["note"], "Петя, Audi A4")   # заметка ушла в мониторинг
+
+        # проверки мониторинга: заметка в каждом сообщении
+        pages = []
+        self.bot.fetcher = type("F", (), {"get": lambda _s, uid, stop=None: pages.pop(0)})()
+
+        def page(ad_ids):
+            return kb.FetchResult("ok", profile=kb.Profile(int(key), "Willi", listings={
+                a: {"title": f"Ad {a}", "url": f"u/{a}", "price": "5 €"} for a in ad_ids}))
+
+        self.bot.state["watch"][key]["seen"] = None
+        pages += [page(["1"]), page(["1", "2"])]
+        first = self.bot.check_watch(key)
+        new = self.bot.check_watch(key)
+        self.assertIn("📝 Петя, Audi A4", first[0])
+        self.assertIn("🆕 Новое объявление у Willi", new[0])
+        self.assertIn("📝 Петя, Audi A4", new[0])
+
+        # «о каждой проверке» — сообщение даже без новых, тоже с заметкой
+        self.text(kb.M_MONITOR)
+        self.assertIn("📝 Петя, Audi A4", self.tg.sent[-1])
+        self.press("О каждой проверке")
+        self.assertTrue(self.bot.cfg["monitor_every_check"])
+        pages.append(page(["1", "2"]))
+        quiet = self.bot.check_watch(key)
+        self.assertIn("новых объявлений нет", quiet[0])
+        self.assertIn("📝 Петя, Audi A4", quiet[0])
+
+        # изменить заметку кнопкой 📝 в мониторинге
+        self.text(kb.M_MONITOR)
+        self.press("📝")
+        self.text("Вася — перекупщик")
+        self.assertEqual(self.bot.state["watch"][key]["note"], "Вася — перекупщик")
+        self.text(kb.M_MONITOR)
+        self.press("📝")
+        self.text("-")
+        self.assertEqual(self.bot.state["watch"][key]["note"], "")
+
+    def test_add_to_monitoring_with_note(self):
+        self.text(kb.M_MONITOR)
+        self.press("Добавить")
+        self.text("https://www.kleinanzeigen.de/s-bestandsliste.html?userId=40300011 Петя, BMW")
+        self.assertEqual(self.bot.state["watch"]["40300011"]["note"], "Петя, BMW")
+        self.text("/watch 40300012 Аня")
+        self.assertEqual(self.bot.state["watch"]["40300012"]["note"], "Аня")
+        self.assertEqual(kb.parse_watch_input("12345678"), (12345678, ""))
+        self.assertEqual(kb.parse_watch_input("привет"), (None, ""))
+
+    def test_note_in_text_input(self):
+        t = kb.parse_target_text("Имя: Willi\nДата регистрации: 01.10.2016\nЗаметка: Петя")
+        self.assertEqual(t.note, "Петя")
+        self.assertEqual(kb.Target.from_dict(t.to_dict()).note, "Петя")

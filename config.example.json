@@ -31,6 +31,7 @@
   "name_fuzzy_threshold": 0.85,
   "auto_watch_on_match": true,
   "max_parallel_searches": 5,
+  "monitor_every_check": false,
   "monitor_minutes_min": 10,
   "monitor_minutes_max": 30,
   "tesseract_cmd": "",
