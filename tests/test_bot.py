@@ -808,6 +808,7 @@ class TestNotes(UIBase):
         pages.append(page(["1", "2"]))
         quiet = self.bot.check_watch(key)
         self.assertIn("новых объявлений нет", quiet[0])
+        self.assertIn(f"s-bestandsliste.html?userId={key}", quiet[0])      # ссылка на аккаунт
         self.assertIn("📝 Петя, Audi A4", quiet[0])
 
         # изменить заметку кнопкой 📝 в мониторинге

@@ -2125,7 +2125,8 @@ class Bot:
                 if res.status == "missing" and w["fails"] == 3:
                     out.append(f"⚠️ Профиль {label} не открывается (удалён?): {PROFILE_URL.format(uid=key)}")
                 elif manual:
-                    out.append(f"⚠️ {label}: не удалось открыть профиль ({res.error or res.status}), повторю позже.")
+                    out.append(f"⚠️ {label}: не удалось открыть профиль ({res.error or res.status}), повторю позже."
+                               f"\n{PROFILE_URL.format(uid=key)}")
                 w["next"] = now + 5 * 60
                 return out
             prof = res.profile
@@ -2137,7 +2138,8 @@ class Bot:
             if w["seen"] is None:
                 w["seen"] = sorted(current)
                 titles.update({ad_id: ad.get("title", "") for ad_id, ad in current.items()})
-                out.append(f"📋 {label}: сейчас {len(current)} объявл. — запомнил, буду присылать только новые.")
+                out.append(f"📋 {label}: сейчас {len(current)} объявл. — запомнил, буду присылать только новые."
+                           f"\n{PROFILE_URL.format(uid=key)}")
             else:
                 seen = set(w["seen"])
                 fresh = []
@@ -2165,7 +2167,8 @@ class Bot:
                 # названия нужны только для объявлений, которые сейчас на странице (ловим замену названия)
                 w["titles"] = {ad_id: titles.get(ad_id, ad.get("title", "")) for ad_id, ad in current.items()}
                 if (manual or self.cfg.get("monitor_every_check")) and not out:
-                    out.append(f"✅ {label}: новых объявлений нет (на странице {len(current)}).")
+                    out.append(f"✅ {label}: новых объявлений нет (на странице {len(current)})."
+                               f"\n{PROFILE_URL.format(uid=key)}")
             w["last"] = now
             lo, hi = self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"]
             w["next"] = now + random.uniform(lo, hi) * 60
