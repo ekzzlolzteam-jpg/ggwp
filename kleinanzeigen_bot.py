@@ -1341,6 +1341,22 @@ class TelegramAPI:
                 time.sleep(2 * (attempt + 1))
         return None
 
+    MAX_BUTTONS = 100     # лимит Telegram на одно сообщение
+
+    @classmethod
+    def _fit(cls, buttons: Optional[list]) -> Optional[list]:
+        """Обрезает кнопки до лимита Telegram (иначе сообщение отклоняется целиком)."""
+        if not buttons:
+            return buttons
+        out, total = [], 0
+        for row in buttons:
+            if total + len(row) > cls.MAX_BUTTONS:
+                log.warning("Слишком много кнопок (%d) — лишние обрезаны", sum(len(r) for r in buttons))
+                break
+            out.append(row)
+            total += len(row)
+        return out
+
     def send(self, chat_id: str, text: str, buttons: Optional[list] = None,
              keyboard: Optional[dict] = None) -> Optional[int]:
         """Отправляет сообщение (длинное — частями). buttons — inline-кнопки под последней частью,
@@ -1351,17 +1367,20 @@ class TelegramAPI:
             params = {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}
             if n == len(chunks) - 1:
                 if buttons:
-                    params["reply_markup"] = {"inline_keyboard": buttons}
+                    params["reply_markup"] = {"inline_keyboard": self._fit(buttons)}
                 elif keyboard:
                     params["reply_markup"] = keyboard
             res = self.call("sendMessage", **params)
+            if res is None and "reply_markup" in params:      # отклонили из-за кнопок — шлём хотя бы текст
+                params.pop("reply_markup")
+                res = self.call("sendMessage", **params)
             if res:
                 msg_id = res.get("message_id")
         return msg_id
 
     def edit(self, chat_id: str, message_id: int, text: str, buttons: Optional[list] = None) -> None:
         self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text[:4000],
-                  disable_web_page_preview=True, reply_markup={"inline_keyboard": buttons or []})
+                  disable_web_page_preview=True, reply_markup={"inline_keyboard": self._fit(buttons) or []})
 
     def delete(self, chat_id: str, message_id: int) -> None:
         self.call("deleteMessage", chat_id=chat_id, message_id=message_id)
@@ -2220,9 +2239,10 @@ class Bot:
                     self.state["watch"][k]["manual"] = True
         self.monitor_wakeup.set()
 
-    MONITOR_PAGE = 8      # аккаунтов на странице: у Telegram лимит 100 кнопок на сообщение
+    MONITOR_PAGE = 15     # аккаунтов на странице: одна кнопка на аккаунт, 3 в ряд
 
     def screen_monitor(self, chat_id: str, msg_id: Optional[int] = None, page: Optional[int] = None) -> None:
+        """Компактный список: одна строка и одна кнопка на аккаунт; всё остальное — в карточке."""
         w = self.state["watch"]
         lo, hi = self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"]
         keys = list(w)
@@ -2231,24 +2251,26 @@ class Bot:
         page = u.get("mon_page", 0) if page is None else page
         page = min(max(0, page), pages - 1)
         u["mon_page"] = page
-        lines = [f"👁 Мониторинг новых объявлений (каждые {lo}–{hi} мин) — аккаунтов: {len(keys)}"]
-        # общие кнопки — наверху, чтобы не терялись под списком аккаунтов
+        lines = [f"👁 Мониторинг (проверка каждые {lo}–{hi} мин) — аккаунтов: {len(keys)}"]
         rows = [[btn("➕ Добавить", "w:new")] + ([btn(f"🔄 Проверить всех ({len(keys)})", "w:all")] if w else [])]
         if w:
             rows.append([btn("📜 Новые объявления всех аккаунтов", "w:ads:*")])
-        for key in keys[page * self.MONITOR_PAGE:(page + 1) * self.MONITOR_PAGE]:
+        start = page * self.MONITOR_PAGE
+        acc_buttons = []
+        for i, key in enumerate(keys[start:start + self.MONITOR_PAGE], start + 1):
             item = w[key]
-            last = time.strftime("%H:%M", time.localtime(item["last"])) if item.get("last") else "ещё не было"
-            lines.append(f"\n• {self.watch_label(key, item)}\n   объявл.: {len(item.get('seen') or [])}, "
-                         f"новых замечено: {len(item.get('new_ads') or [])}, последняя проверка: {last}")
-            short = item.get("note") or item.get("name") or key
+            last = time.strftime("%H:%M", time.localtime(item["last"])) if item.get("last") else "—"
             n_new = len(item.get("new_ads") or [])
-            rows.append([btn(f"🔍 {short[:20]}", f"w:chk:{key}"), btn(f"📜 {n_new}", f"w:ads:{key}"),
-                         btn("📝", f"w:note:{key}"), btn("🗑", f"w:del:{key}")])
+            name = item.get("name") or f"ID {key}"
+            lines.append(f"{i}. {name}" + (f" — 📝 {item['note']}" if item.get("note") else "")
+                         + f" · {len(item.get('seen') or [])} объявл." + (f" · 🆕{n_new}" if n_new else "")
+                         + f" · {last}")
+            acc_buttons.append(btn(f"{i}. {(item.get('note') or name)[:14]}", f"w:card:{key}"))
+        rows += chunked(acc_buttons, 3)
         if not w:
             lines.append("Пока никого. Найденные поиском добавляются сами, или нажми «➕ Добавить».")
         else:
-            lines.append("\n🔍 проверить сейчас · 📜 все новые объявления (число) · 📝 заметка · 🗑 убрать")
+            lines.append("\nНажми на аккаунт — откроется карточка: проверить, новые объявления, заметка, убрать.")
         if pages > 1:
             lines.append(f"Страница {page + 1} из {pages}")
             rows.append([btn("◀️", f"w:pg:{page - 1}") if page > 0 else btn("·", "noop"),
@@ -2257,6 +2279,26 @@ class Bot:
         every = self.cfg.get("monitor_every_check")
         rows.append([btn(f"⏱ Интервал: {lo}–{hi} мин", "w:int"),
                      btn("🔔 О каждой проверке: " + ("вкл" if every else "выкл"), "w:every")])
+        self.show(chat_id, "\n".join(lines), rows, msg_id)
+
+    def screen_watch_card(self, chat_id: str, key: str, msg_id: Optional[int] = None, note: str = "") -> None:
+        item = self.state["watch"].get(key)
+        if item is None:
+            self.screen_monitor(chat_id, msg_id)
+            return
+        last = time.strftime("%d.%m %H:%M", time.localtime(item["last"])) if item.get("last") else "ещё не было"
+        n_new = len(item.get("new_ads") or [])
+        lines = [f"👤 {item.get('name') or 'ID ' + key} (ID {key})",
+                 f"📝 Заметка: {item.get('note') or '—'}",
+                 f"Объявлений на странице: {len(item.get('seen') or [])}",
+                 f"Новых замечено с начала мониторинга: {n_new}",
+                 f"Последняя проверка: {last}",
+                 PROFILE_URL.format(uid=key)]
+        if note:
+            lines.append("\n" + note)
+        rows = [[btn("🔍 Проверить сейчас", f"w:chk:{key}"), btn(f"📜 Новые ({n_new})", f"w:ads:{key}")],
+                [btn("📝 Заметка", f"w:note:{key}"), btn("🗑 Убрать", f"w:delask:{key}")],
+                [btn("⬅️ К списку", "w:list")]]
         self.show(chat_id, "\n".join(lines), rows, msg_id)
 
     def screen_interval(self, chat_id: str, msg_id: Optional[int]) -> None:
@@ -2405,7 +2447,9 @@ class Bot:
             if key:
                 note = "" if text.strip() in ("-", "—") else re.sub(r"\s+", " ", text).strip()[:200]
                 self.set_watch_note(key, note)
-            self.screen_monitor(chat_id)
+                self.screen_watch_card(chat_id, key, note="✅ Заметка сохранена." if note else "Заметка убрана.")
+            else:
+                self.screen_monitor(chat_id)
         else:
             target = parse_target_text(text)
             if target:
@@ -2605,16 +2649,32 @@ class Bot:
                 cur = item.get("note")
                 self.show(chat_id, f"📝 Заметка к {item.get('name') or key} (ID {key}) — чей это аккаунт?\n"
                                    + (f"Сейчас: {cur}\n" if cur else "") + "Напиши новую («-» — убрать).",
-                          [[btn("⬅️ Назад", "w:list")]], msg_id)
+                          [[btn("⬅️ Назад", f"w:card:{key}")]], msg_id)
                 return
             if act == "every":
                 self.save_config(monitor_every_check=not self.cfg.get("monitor_every_check"))
+            if act == "card":
+                u["step"] = None
+                self.screen_watch_card(chat_id, parts[2], msg_id)
+                return
+            if act == "delask":
+                item = self.state["watch"].get(parts[2])
+                if item is None:
+                    self.screen_monitor(chat_id, msg_id)
+                    return
+                self.show(chat_id, f"🗑 Убрать из мониторинга {self.watch_label(parts[2], item)}?\n"
+                                   f"Новые объявления по нему больше не будут приходить.",
+                          [[btn("✅ Да, убрать", f"w:del:{parts[2]}"), btn("❌ Нет", f"w:card:{parts[2]}")]], msg_id)
+                return
+            if act == "chk":
+                self.request_check([parts[2]])
+                self.screen_watch_card(chat_id, parts[2], msg_id,
+                                       note="🔍 Проверяю… результат придёт отдельным сообщением.")
+                return
             if act == "del":
                 with self.lock:
                     self.state["watch"].pop(parts[2], None)
-            elif act == "chk":
-                self.request_check([parts[2]])
-                self.tg.send(chat_id, "🔍 Проверяю…")
+                    self.save()
             elif act == "all":
                 self.request_check(list(self.state["watch"]))
                 self.tg.send(chat_id, f"🔍 Проверяю все {len(self.state['watch'])} аккаунтов — по каждому придёт "

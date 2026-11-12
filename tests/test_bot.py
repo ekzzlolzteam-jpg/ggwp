@@ -603,7 +603,11 @@ class TestButtonsUI(UIBase):
         self.press("30–60")
         self.assertEqual((self.bot.cfg["monitor_minutes_min"], self.bot.cfg["monitor_minutes_max"]), (30, 60))
         self.text(kb.M_MONITOR)
-        self.press("🗑")
+        self.press("1. ")                                 # открыть карточку аккаунта
+        self.assertIn("ID 40300011", self.tg.edits[-1])
+        self.press("🗑 Убрать")
+        self.assertIn("40300011", self.bot.state["watch"], "сначала спрашивает подтверждение")
+        self.press("Да, убрать")
         self.assertNotIn("40300011", self.bot.state["watch"])
 
         self.text(kb.M_PROXY)
@@ -811,13 +815,14 @@ class TestNotes(UIBase):
         self.assertIn(f"s-bestandsliste.html?userId={key}", quiet[0])      # ссылка на аккаунт
         self.assertIn("📝 Петя, Audi A4", quiet[0])
 
-        # изменить заметку кнопкой 📝 в мониторинге
+        # изменить заметку: список → карточка аккаунта → 📝
         self.text(kb.M_MONITOR)
-        self.press("📝")
+        self.press("1. Петя")
+        self.press("📝 Заметка")
         self.text("Вася — перекупщик")
         self.assertEqual(self.bot.state["watch"][key]["note"], "Вася — перекупщик")
-        self.text(kb.M_MONITOR)
-        self.press("📝")
+        self.assertIn("Заметка сохранена", self.tg.sent[-1])        # вернулись в карточку
+        self.press("📝 Заметка")
         self.text("-")
         self.assertEqual(self.bot.state["watch"][key]["note"], "")
 
@@ -972,7 +977,9 @@ class TestMonitorAds(unittest.TestCase):
         self.check({"1": "Altes", "3": "Nintendo Switch"})
         self.assertEqual([a["title"] for a in self.bot.state["watch"]["5"]["new_ads"]], ["Dyson V11", "Nintendo Switch"])
         self.bot.screen_monitor("1")
-        self.assertIn("📜 2", str(self.tg.buttons))
+        self.assertIn("🆕2", self.tg.sent[-1])                 # в списке видно число новых
+        self.bot.handle_callback("1", "w:card:5", 7)           # карточка аккаунта
+        self.assertIn("📜 Новые (2)", str(self.tg.buttons))
         self.bot.handle_callback("1", "w:ads:5", 7)
         text = self.tg.sent[-1]
         self.assertIn("новых объявлений: 2", text)
@@ -1026,10 +1033,48 @@ class TestMonitorScreen(unittest.TestCase):
             self.assertIn("Проверить всех (40)", tg.buttons[0][-1]["text"], "кнопка — в первом ряду")
             self.assertLessEqual(sum(len(r) for r in tg.buttons), 100, "лимит Telegram — 100 кнопок")
             self.assertLess(len(tg.sent[-1]), 4000)
-            self.assertIn("Страница 1 из 5", tg.sent[-1])
-            bot.handle_callback("1", "w:pg:4", 7)
+            self.assertIn("Страница 1 из 3", tg.sent[-1], "40 аккаунтов — 3 страницы по 15")
+            bot.handle_callback("1", "w:pg:2", 7)
             self.assertIn("N39", tg.edits[-1])
             self.assertNotIn("N0 ", tg.edits[-1])
             bot.handle_callback("1", "w:all", 7)
             self.assertTrue(all(w.get("manual") for w in bot.state["watch"].values()), "проверяются все 40")
+            bot.pool.shutdown()
+
+
+
+class TestButtonLimit(unittest.TestCase):
+    def test_fit_and_fallback_to_text(self):
+        rows = [[kb.btn(str(i), "noop")] * 4 for i in range(41)]          # 164 кнопки, как было у тебя
+        fitted = kb.TelegramAPI._fit(rows)
+        self.assertLessEqual(sum(len(r) for r in fitted), 100)
+        api = kb.TelegramAPI("123:abc")
+        calls = []
+
+        def fake_call(method, **params):
+            calls.append("reply_markup" in params)
+            return None if "reply_markup" in params else {"message_id": 1}   # Telegram отклонил кнопки
+        api.call = fake_call
+        self.assertEqual(api.send("1", "текст", rows), 1, "текст всё равно доставлен")
+        self.assertEqual(calls, [True, False])
+
+    def test_41_accounts_like_user(self):
+        names = ["R H", "Stefanie Werner", "MNT", "Dirk Butzheinen", "RALF", "A.O", "Lisa Krone", "privater Nutzer",
+                 "WiYa", "Matthias", "AL", "Corinna", "Daniela Haas", "M. H.", "Kristin", "Silva Keberle", "Holger",
+                 "Inge", "M.L.", "R.A.", "Jasmin", "L.P.", "Nd", "Caro", "E.V.", "Franzi F.", "Gudrun Butler ,",
+                 "Traub Andreas", "Smago", "O. Sch.", "Privat", "Familie", "Weber", "M.Wiegert", "Robert",
+                 "Sabine Khan", "Tanja", "Avvuran", "Frank", "Hoang", "TAVIRP"]
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = kb.Bot(dict(CFG, data_dir=tmp, allowed_chat_ids=["1"], telegram_token="x"))
+            tg = bot.tg = FakeTG()
+            for i, n in enumerate(names):
+                bot.state["watch"][str(10000000 + i)] = {"name": n, "note": "@QwertyIand" if n == "Privat" else "",
+                                                         "seen": ["1"] * (i % 7), "next": 9e12, "fails": 0}
+            seen = set()
+            for page in range(3):
+                bot.screen_monitor("1", page=page)
+                self.assertLessEqual(sum(len(r) for r in tg.buttons), 30)
+                self.assertLess(len(tg.sent[-1]), 2000)
+                seen |= {b["callback_data"] for r in tg.buttons for b in r if b["callback_data"].startswith("w:card:")}
+            self.assertEqual(len(seen), 41, "все 41 аккаунт доступны на 3 страницах")
             bot.pool.shutdown()
