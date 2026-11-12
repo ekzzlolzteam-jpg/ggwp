@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 import unicodedata
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -62,8 +63,7 @@ DEFAULT_CONFIG: dict = {
     # --- Сеть ---
     "proxy_url": "",                 # "socks5://user:pass@host:port" или KA_PROXY_URL
     "proxy_urls": [],                # несколько прокси — скорость складывается
-    "requests_per_second": 8,        # лимит НА ОДИН прокси (IP)
-    "workers": 0,                    # потоков при переборе; 0 = подобрать автоматически
+    "requests_per_second": 8,        # лимит НА ОДИН прокси (IP); потоки подбираются автоматически
     "request_timeout": 15,
     "max_retries": 4,                # повторов на один ID при 403/5xx/таймауте
     "block_threshold": 20,           # столько блокировок подряд -> пауза
@@ -79,7 +79,9 @@ DEFAULT_CONFIG: dict = {
     "chunk_size": 200,
     "name_fuzzy_threshold": 0.85,
     "auto_watch_on_match": True,     # «✅ Это он» или единственное точное совпадение → мониторинг
-    "max_parallel_searches": 5,      # сколько поисков идут одновременно (делят общую скорость)
+    "parallel_searches": 3,          # сколько поисков идут одновременно (делят общую скорость)
+    "max_queue": 15,                 # сколько поисков может ждать в «корзине»
+    "recheck_delay_seconds": 3,      # пауза между запросами при «медленной» перепроверке ошибок
     # --- Мониторинг ---
     "monitor_every_check": False,    # True — сообщение о КАЖДОЙ проверке (с заметкой), даже без новых
     "monitor_minutes_min": 10,
@@ -90,7 +92,8 @@ DEFAULT_CONFIG: dict = {
 }
 
 
-OBSOLETE_KEYS = ("stop_on_exact_match", "save_found_to_config", "day_cache_days", "found_accounts")
+OBSOLETE_KEYS = ("stop_on_exact_match", "save_found_to_config", "day_cache_days", "found_accounts",
+                 "workers", "max_parallel_searches")
 
 
 def load_config(path: Path) -> dict:
@@ -109,8 +112,8 @@ def load_config(path: Path) -> dict:
     cfg["allowed_chat_ids"] = [str(x) for x in cfg["allowed_chat_ids"]]
     if cfg["monitor_minutes_min"] > cfg["monitor_minutes_max"]:
         raise ValueError("monitor_minutes_min больше monitor_minutes_max")
-    if cfg["requests_per_second"] <= 0 or cfg["workers"] < 0:
-        raise ValueError("requests_per_second должен быть > 0, workers — 0 (авто) или больше")
+    if cfg["requests_per_second"] <= 0:
+        raise ValueError("requests_per_second должен быть > 0")
     return cfg
 
 
@@ -424,6 +427,7 @@ class Lane:
         self.level = 0
         self.requests = 0
         self.blocked = 0
+        self.errors = 0
         self.latency = 1.0          # среднее время ответа, сек
 
     @property
@@ -440,6 +444,29 @@ class Fetcher:
         self._gen = 0                   # меняется при смене прокси -> сессии пересоздаются
         self.lanes = [Lane(u) for u in proxy_list(cfg) or [""]]
         self.stats = {"requests": 0, "ok": 0, "missing": 0, "blocked": 0, "errors": 0}
+        self.error_kinds: dict[str, int] = {}   # почему ID не открылся (после всех повторов)
+        self._done = deque(maxlen=20000)        # время каждого ответа — для реальной скорости
+
+    def current_rate(self, window: float = 60.0) -> float:
+        """Сколько запросов в секунду реально делается сейчас (за последнюю минуту)."""
+        now = time.monotonic()
+        with self._lock:
+            recent = [t for t in self._done if now - t <= window]
+        if len(recent) < 2:
+            return 0.0
+        return len(recent) / max(1.0, min(window, now - min(recent)))
+
+    def _fail(self, kind: str, lane: Optional[Lane]) -> None:
+        with self._lock:
+            self.stats["errors"] += 1
+            self.error_kinds[kind] = self.error_kinds.get(kind, 0) + 1
+            if lane is not None:
+                lane.errors += 1
+
+    def errors_summary(self, top: int = 4) -> str:
+        with self._lock:
+            items = sorted(self.error_kinds.items(), key=lambda x: -x[1])[:top]
+        return ", ".join(f"{k} — {v}" for k, v in items)
 
     def set_proxies(self, urls: list[str]) -> None:
         with self._lock:
@@ -456,8 +483,6 @@ class Fetcher:
     def worker_count(self) -> int:
         """Сколько потоков нужно, чтобы реально выйти на лимит скорости.
         Поток ждёт ответа ~latency сек, поэтому нужно rps × latency потоков (+ запас)."""
-        if int(self.cfg.get("workers") or 0) > 0:
-            return int(self.cfg["workers"])
         latency = max(0.5, max(lane.latency for lane in self.lanes))
         return int(min(64, max(4, self.total_rps * latency * 2)))
 
@@ -510,7 +535,7 @@ class Fetcher:
         for lane in self.lanes:
             st = f"⛔ пауза {int(lane.pause_until - now) // 60 + 1} мин" if lane.pause_until > now else "✅"
             out.append(f"{lane.label}: {st}, запросов {lane.requests:,}, блок. {lane.blocked}, "
-                       f"ответ ~{lane.latency:.1f} с")
+                       f"ошибок {lane.errors}, ответ ~{lane.latency:.1f} с")
         return out
 
     def _on_success(self, lane: Lane, latency: float) -> None:
@@ -536,10 +561,10 @@ class Fetcher:
             " Потом продолжу на пониженной скорости, ничего делать не нужно."
         self.notify(f"⛔ Сайт режет запросы через {lane.label} (403/429). Пауза для него {minutes} мин.{tail}")
 
-    def get(self, user_id: int, stop: Optional[threading.Event] = None) -> FetchResult:
+    def get(self, user_id: int, stop: Optional[threading.Event] = None, retries: Optional[int] = None) -> FetchResult:
         url = PROFILE_URL.format(uid=user_id)
         last = FetchResult("error", error="no attempts")
-        for attempt in range(self.cfg["max_retries"] + 1):
+        for attempt in range((self.cfg["max_retries"] if retries is None else retries) + 1):
             if stop is not None and stop.is_set():
                 return FetchResult("error", error="stopped")
             lane = self._acquire(stop)
@@ -553,6 +578,7 @@ class Fetcher:
                 with self._lock:
                     self.stats["requests"] += 1
                     lane.requests += 1
+                    self._done.append(time.monotonic())
                 code = resp.status_code
                 if code in (404, 410):
                     self._on_success(lane, elapsed)
@@ -567,8 +593,7 @@ class Fetcher:
                         except Exception as exc:   # кривая страница — ошибка одного ID, а не всего поиска
                             log.warning("Не удалось разобрать страницу %s: %s: %s", user_id,
                                         type(exc).__name__, str(exc)[:100])
-                            with self._lock:
-                                self.stats["errors"] += 1
+                            self._fail("страница не разобралась", lane)
                             return FetchResult("error", http_code=code, error=f"parse {type(exc).__name__}")
                         if prof.page_user_id not in (None, user_id):
                             prof.name = prof.aktiv_seit = None   # редирект на чужой профиль
@@ -591,6 +616,8 @@ class Fetcher:
                 else:
                     last = FetchResult("error", http_code=code, error=f"HTTP {code}")
             except Exception as exc:   # requests / socks / ssl — всё считаем сетевой ошибкой
+                with self._lock:
+                    self._done.append(time.monotonic())
                 last = FetchResult("error", error=type(exc).__name__)
             if blocked:
                 self._on_blocked(lane)
@@ -600,9 +627,17 @@ class Fetcher:
                     return FetchResult("error", error="stopped")
             else:
                 time.sleep(backoff)
-        with self._lock:
-            self.stats["errors"] += 1
+        self._fail(ERROR_RU.get(last.error, last.error or "неизвестно"), lane)
         return last
+
+
+ERROR_RU = {   # понятные названия частых ошибок
+    "ReadTimeout": "прокси/сайт не ответил вовремя", "ConnectTimeout": "не подключиться к прокси",
+    "ProxyError": "ошибка прокси", "ConnectionError": "обрыв связи", "SSLError": "ошибка SSL",
+    "ChunkedEncodingError": "оборванный ответ", "HTTP 403": "блокировка 403", "HTTP 429": "блокировка 429",
+    "block page": "страница-капча", "HTTP 500": "сайт: 500", "HTTP 502": "сайт: 502", "HTTP 503": "сайт: 503",
+    "HTTP 504": "сайт: 504",
+}
 
 
 # =====================================================================
@@ -612,36 +647,67 @@ LEGACY_ANCHOR_FILES = (BASE_DIR / "known_accounts", BASE_DIR / "known_accounts.t
 
 
 class AnchorStore:
+    """База дат «ID → дата регистрации». Хранится ОДНА запись на дату: для прыжков этого хватает,
+    лишние записи рядом ничего не дают. Новые записи дописываются в path, база из репозитория
+    (extra_files) только читается."""
+
     def __init__(self, path: Path, seeds: Iterable = (), extra_files: Iterable[Path] = ()):
-        """path — куда дописываются новые пары; extra_files — только чтение (база из репозитория)."""
         self.path = path
         self._lock = threading.Lock()
-        self._data: dict[int, date] = {}
+        self._by_day: dict[int, int] = {}      # ordinal даты -> user_id
         self._pending: list[str] = []
+        base: list[tuple[int, date]] = []
         for uid, d in seeds:
             pd = parse_date(str(d))
             if pd:
-                self._data[int(uid)] = pd
-        for p in (*extra_files, path):
-            if p.exists():
-                for line in p.read_text(encoding="utf-8").splitlines():
-                    if ";" in line:
-                        uid, d = line.split(";", 1)
-                        pd = parse_date(d)
-                        if uid.strip().isdigit() and pd:
-                            self._data[int(uid.strip())] = pd
+                base.append((int(uid), pd))
+        for p in extra_files:
+            base += self._read(p)
+        for uid, d in base:
+            self._by_day.setdefault(d.toordinal(), uid)
+        own = self._read(path)
+        kept = []
+        for uid, d in own:
+            if d.toordinal() not in self._by_day:
+                self._by_day[d.toordinal()] = uid
+                kept.append((uid, d))
+        if len(kept) != len(own):              # сжать файл: по одной записи на дату
+            self._rewrite(kept)
+            log.info("База дат сжата: %d → %d записей", len(own), len(kept))
+
+    @staticmethod
+    def _read(p: Path) -> list[tuple[int, date]]:
+        out = []
+        if p.exists():
+            for line in p.read_text(encoding="utf-8").splitlines():
+                if ";" in line:
+                    uid, d = line.split(";", 1)
+                    pd = parse_date(d)
+                    if uid.strip().isdigit() and pd:
+                        out.append((int(uid.strip()), pd))
+        return out
+
+    def _rewrite(self, rows: list[tuple[int, date]]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text("".join(f"{u};{fmt_date(d)}\n" for u, d in sorted(rows)), encoding="utf-8")
+        tmp.replace(self.path)
 
     def __len__(self) -> int:
-        return len(self._data)
+        return len(self._by_day)
 
-    def add(self, uid: int, d: date) -> None:
+    def has_day(self, d: date) -> bool:
+        return d.toordinal() in self._by_day
+
+    def add(self, uid: int, d: date) -> bool:
+        """Запоминает дату, если для неё ещё нет записи. True — если добавлено."""
         with self._lock:
-            if self._data.get(uid) == d:
-                return
-            self._data[uid] = d
+            if d.toordinal() in self._by_day:
+                return False
+            self._by_day[d.toordinal()] = uid
             self._pending.append(f"{uid};{fmt_date(d)}")
-            if len(self._pending) >= 20:
-                self._flush_locked()
+            self._flush_locked()
+            return True
 
     def flush(self) -> None:
         with self._lock:
@@ -657,7 +723,7 @@ class AnchorStore:
 
     def items(self) -> list[tuple[int, date]]:
         with self._lock:
-            return sorted(self._data.items())
+            return sorted((uid, date.fromordinal(day)) for day, uid in self._by_day.items())
 
 
 # =====================================================================
@@ -699,7 +765,6 @@ class RangeLocator:
         res = self.fetcher.get(uid, self.stop)
         if res.status == "ok" and res.profile and res.profile.aktiv_seit:
             day = res.profile.aktiv_seit.toordinal()
-            self.anchors.add(uid, res.profile.aktiv_seit)
             self.cache[uid] = day
             return day
         if res.status in ("ok", "missing"):
@@ -964,6 +1029,7 @@ class Job:
     missing: int = 0
     error_ids: list = field(default_factory=list)
     matches: list = field(default_factory=list)   # dict(Match)
+    sample: Optional[int] = None                   # любой профиль этой даты — для базы дат
     started: float = field(default_factory=time.time)
     message: str = ""
 
@@ -978,14 +1044,13 @@ class Job:
 class Scanner:
     def __init__(self, fetcher, cfg: dict, stop: threading.Event, pause: threading.Event,
                  on_match: Callable[[Match], None], save: Callable[[], None],
-                 on_sample: Callable[[Profile], None] = lambda _p: None, share: Callable[[], int] = lambda: 1):
+                 share: Callable[[], int] = lambda: 1):
         self.fetcher = fetcher
         self.cfg = cfg
         self.stop = stop
         self.pause = pause
         self.on_match = on_match
         self.save = save
-        self.on_sample = on_sample   # по одному профилю из пачки — в базу дат
         self.share = share           # сколько поисков сейчас делят потоки
 
     def _workers(self) -> int:
@@ -1006,13 +1071,11 @@ class Scanner:
             results.append((uid, item.result()))
         if any(r.error == "stopped" for _, r in results):
             return False
-        sampled = False
         for uid, res in results:
             if res.status == "ok" and res.profile:
                 job.profiles += 1
-                if not sampled and res.profile.aktiv_seit:
-                    self.on_sample(res.profile)
-                    sampled = True
+                if job.sample is None and res.profile.aktiv_seit == target.aktiv_seit:
+                    job.sample = uid
                 m = match_profile(target, res.profile, self.cfg["name_fuzzy_threshold"])
                 if m and not any(x["user_id"] == uid for x in job.matches):
                     job.matches.append(asdict(m))
@@ -1070,31 +1133,9 @@ class Scanner:
         if job.cursor is None:
             job.cursor = job.first
         chunks = (list(range(c, min(c + size - 1, job.last) + 1)) for c in range(job.cursor, job.last + 1, size))
-        if not self._run_chunks(job, target, chunks, pool, advance_cursor=True):
-            return
-        # автоматическая перепроверка ID с ошибками (до 3 кругов, пока их становится меньше)
-        for _ in range(3):
-            before = len(job.error_ids)
-            if not before or self.stop.is_set():
-                break
-            self.recheck(job, pool)
-            if len(job.error_ids) >= before:
-                break
-
-    def recheck(self, job: Job, pool: Optional[ThreadPoolExecutor] = None) -> int:
-        ids = list(job.error_ids)
-        if not ids:
-            return 0
-        own = pool is None
-        pool = pool or ThreadPoolExecutor(max_workers=self._workers())
-        try:
-            size = max(1, int(self.cfg["chunk_size"]))
-            self._run_chunks(job, Target.from_dict(job.target), (ids[i:i + size] for i in range(0, len(ids), size)),
-                             pool, advance_cursor=False)
-        finally:
-            if own:
-                pool.shutdown(wait=True)
-        return len(ids)
+        self._run_chunks(job, target, chunks, pool, advance_cursor=True)
+        # ID, которые не открылись, остаются в job.error_ids — их перепроверяют потом
+        # медленно и отдельно (кнопка «🔁 Перепроверить»), чтобы не нарываться на блокировки
 
 
 # =====================================================================
@@ -1334,14 +1375,15 @@ HELP = f"""🔎 Поиск пользователя Kleinanzeigen
 
 Всё управляется кнопками внизу:
 {M_SEARCH} — ввести имя, выбрать дату и плашки кнопками
-{M_TASKS} — идущие поиски: ⏸ пауза и ⏹ стоп для каждого
+{M_TASKS} — поиски в работе (⏸/⏹ для каждого), 🧺 корзина, перепроверка ошибок
 {M_STATUS} — прогресс и скорость
 {M_RESULTS} — что найдено в идущих поисках
 {M_MONITOR} — слежка за новыми объявлениями, 📝 заметки «чей аккаунт»
 {M_PROXY} — прокси и скорость запросов
 
 📸 В любой момент можно прислать СКРИНШОТ профиля (можно сразу несколько) —
-каждый станет отдельным поиском, они идут одновременно.
+каждый станет отдельным поиском: 3 идут одновременно, остальные ждут в корзине (до 15)
+и запускаются сами, как только освобождается место.
 Поиск перебирает день до конца и сообщает о КАЖДОМ совпадении.
 Уверен, что нашёлся нужный? Жми «✅ Это он» под сообщением — поиск остановится.
 📝 На карточке перед поиском можно добавить заметку (чей аккаунт) — она будет
@@ -1424,6 +1466,8 @@ class Bot:
         self.state = self._load_state()
         self.runs: dict[int, SearchRun] = {}    # идущие и ждущие поиски (только в памяти)
         self.notes_by_uid: dict[int, str] = {}  # заметка найденного аккаунта — для кнопки «👁 Следить»
+        self.leftovers: dict[int, dict] = {}    # № поиска -> ID, которые не открылись (до перепроверки)
+        self.recheck: Optional[dict] = None     # идущая медленная перепроверка
         self.next_num = 1
         # общий пул потоков для всех поисков: лимит скорости всё равно общий
         self.pool = ThreadPoolExecutor(max_workers=64, thread_name_prefix="fetch")
@@ -1493,19 +1537,28 @@ class Bot:
     def job_running(self) -> bool:
         return bool(self.active_runs())
 
+    @property
+    def parallel_limit(self) -> int:
+        return max(1, int(self.cfg["parallel_searches"]))
+
     def submit_search(self, target: Target) -> str:
-        """Запускает поиск сразу (до max_parallel_searches одновременно), остальные ждут."""
+        """Запускает поиск, если есть свободный слот (parallel_searches), иначе кладёт в корзину."""
         with self.lock:
+            if len(self.active_runs()) >= self.parallel_limit and \
+                    len(self.queued_runs()) >= int(self.cfg["max_queue"]):
+                return f"🧺 Корзина полна ({self.cfg['max_queue']}/{self.cfg['max_queue']}). Дождись, пока " \
+                       f"освободится место, или убери лишнее в «{M_TASKS}»."
             run = SearchRun(self.next_num, target)
             self.next_num += 1
             self.runs[run.num] = run
-            if len(self.active_runs()) < max(1, int(self.cfg["max_parallel_searches"])):
+            if len(self.active_runs()) < self.parallel_limit:
                 self._start(run)
                 n = len(self.active_runs())
-                tail = f"\nСейчас идёт поисков: {n} — скорость делится между ними." if n > 1 else ""
+                tail = f"\nСейчас идёт поисков: {n} из {self.parallel_limit} — скорость делится." if n > 1 else ""
                 return f"🚀 Поиск #{run.num} запущен: {target.name}, {fmt_date(target.aktiv_seit)}{tail}"
-            return f"⏳ Поиск #{run.num} ждёт: уже идёт {len(self.active_runs())} поисков " \
-                   f"(лимит {self.cfg['max_parallel_searches']}). Начнётся сам, когда один закончится."
+            return f"🧺 Поиск #{run.num} в корзине ({len(self.queued_runs())}/{self.cfg['max_queue']}): " \
+                   f"{target.name}, {fmt_date(target.aktiv_seit)}.\nВсе {self.parallel_limit} слота заняты — " \
+                   f"начнётся сам, как только один освободится."
 
     def _start(self, run: SearchRun) -> None:
         run.phase = "ищу диапазон ID"
@@ -1514,7 +1567,7 @@ class Bot:
 
     def _start_queued(self) -> None:
         with self.lock:
-            limit = max(1, int(self.cfg["max_parallel_searches"]))
+            limit = self.parallel_limit
             started = []
             for run in self.queued_runs():
                 if len(self.active_runs()) >= limit:
@@ -1522,7 +1575,8 @@ class Bot:
                 self._start(run)
                 started.append(run)
         for run in started:
-            self.broadcast(f"▶️ Поиск #{run.num} начался: {run.target.name}, {fmt_date(run.target.aktiv_seit)}")
+            self.broadcast(f"▶️ Из корзины в работу — поиск #{run.num}: {run.target.name}, "
+                           f"{fmt_date(run.target.aktiv_seit)}{note_suffix(run.target.note)}")
 
     def _on_match(self, run: SearchRun, m: Match) -> None:
         if m.level == "conflict":
@@ -1556,7 +1610,6 @@ class Bot:
                            f"о каждом совпадении сообщу сразу.")
             job.status, run.phase = "scanning", "перебор"
             Scanner(self.fetcher, self.cfg, run.stop, run.pause, lambda m: self._on_match(run, m), lambda: None,
-                    on_sample=lambda p: self.anchors.add(p.user_id, p.aktiv_seit),
                     share=lambda: max(1, len(self.active_runs()))).run(job, self.pool)
             job.status = "stopped" if run.stop.is_set() else "done"
         except LocateError as exc:
@@ -1568,10 +1621,19 @@ class Bot:
             log.exception("Ошибка поиска #%s", run.num)
             job.status, job.message = "failed", f"{type(exc).__name__}: {str(exc)[:200]}"
         finally:
-            self.anchors.flush()
+            # в базу дат — одна запись на искомую дату: подтверждённый/найденный аккаунт или любой этого дня
+            exact = [m["user_id"] for m in job.matches if m["level"] == "exact"]
+            keep = run.confirmed or (exact[0] if exact else None) or job.sample
+            if keep:
+                self.anchors.add(keep, target.aktiv_seit)
             with self.lock:
                 self.runs.pop(run.num, None)     # поиск закончен — забываем
-        self.broadcast(self.report(run), self._watch_buttons(job.matches))
+                if job.error_ids:
+                    self.leftovers[run.num] = {"target": target, "ids": list(job.error_ids)}
+        buttons = self._watch_buttons(job.matches) or []
+        if job.error_ids:
+            buttons = [[btn(f"🔁 Перепроверить {len(job.error_ids)} ID (медленно)", f"j:re:{run.num}")]] + buttons
+        self.broadcast(self.report(run), buttons or None)
         if self.cfg["auto_watch_on_match"]:
             exact = [m for m in job.matches if m["level"] == "exact"]
             if run.confirmed:
@@ -1598,6 +1660,10 @@ class Bot:
             lines.append(f"Диапазон: {job.first:,}–{job.last:,}; проверено {job.checked:,}/{job.total:,} "
                          f"(профилей {job.profiles:,}, пустых {job.missing:,}, не открылись {len(job.error_ids)})")
         lines += self._matches_lines(job.matches)
+        if job.error_ids:
+            lines.append(f"\n⚠️ {len(job.error_ids)} ID не открылись (ошибки сети/блокировки) — среди них может "
+                         f"быть нужный. Кнопка «🔁 Перепроверить» проверит их медленно и осторожно, "
+                         f"по одному раз в ~{self.cfg['recheck_delay_seconds']} с.")
         return "\n".join(lines)
 
     @staticmethod
@@ -1621,8 +1687,24 @@ class Bot:
         return rows[:8] or None
 
     def run_action(self, num: int, action: str, uid: Optional[int] = None) -> str:
+        if action == "re":
+            return self.start_recheck(num)
+        if action == "rmre":
+            self.leftovers.pop(num, None)
+            return f"🗑 Ошибки поиска #{num} забыты."
+        if action == "restop" and self.recheck:
+            self.recheck["stop"].set()
+            return "⏹ Останавливаю перепроверку…"
+        if action == "par":
+            self.save_config(parallel_searches=int(uid or 3))
+            self._start_queued()
+            return f"Одновременно будет идти поисков: {self.parallel_limit}."
         run = self.runs.get(num)
         if run is None:
+            if action == "ok" and uid:               # поиск уже закончен — просто ставим в мониторинг
+                if not self.add_watch(uid, note=self.notes_by_uid.get(uid, "")):
+                    return "Этот аккаунт уже в мониторинге."
+                return ""
             return f"Поиск #{num} уже закончен."
         if action in ("stop", "ok"):
             if action == "ok" and uid:
@@ -1642,6 +1724,66 @@ class Bot:
             run.pause.clear()
             return f"▶️ Поиск #{num} продолжается."
         return ""
+
+    def start_recheck(self, num: int) -> str:
+        item = self.leftovers.get(num)
+        if not item:
+            return f"У поиска #{num} нет ID для перепроверки (или они уже перепроверены)."
+        if self.recheck is not None:
+            return "Уже идёт перепроверка — дождись её конца (видно в «📋 Задачи»)."
+        task = {"num": num, "target": item["target"], "ids": item["ids"], "done": 0, "fixed": 0,
+                "stop": threading.Event()}
+        self.recheck = task
+        threading.Thread(target=self._recheck_slowly, args=(task,), name=f"recheck-{num}", daemon=True).start()
+        mins = len(item["ids"]) * (self.cfg["recheck_delay_seconds"] + 1) / 60
+        return f"🔁 Перепроверяю {len(item['ids'])} ID поиска #{num} медленно (~{max(1, round(mins))} мин). " \
+               f"О совпадениях сообщу, итог пришлю."
+
+    def _recheck_slowly(self, task: dict) -> None:
+        """Перепроверка ID с ошибками: по одному, с паузой, с дополнительными повторами —
+        чтобы не нарваться на блокировку заново."""
+        num, target, stop = task["num"], task["target"], task["stop"]
+        fake_run = SearchRun(num, target)
+        retries = max(6, int(self.cfg["max_retries"]))     # больше повторов, чем при обычном переборе
+        is_real = isinstance(self.fetcher, Fetcher)
+        left = []
+        matches = []
+        try:
+            for uid in task["ids"]:
+                if stop.is_set():
+                    left.append(uid)
+                    continue
+                res = self.fetcher.get(uid, stop, retries=retries) if is_real else self.fetcher.get(uid, stop)
+                task["done"] += 1
+                if res.status == "ok" and res.profile:
+                    task["fixed"] += 1
+                    m = match_profile(target, res.profile, self.cfg["name_fuzzy_threshold"])
+                    if m:
+                        matches.append(asdict(m))
+                        self._on_match(fake_run, m)
+                elif res.status == "missing":
+                    task["fixed"] += 1
+                else:
+                    left.append(uid)
+                stop.wait(float(self.cfg["recheck_delay_seconds"]) * random.uniform(0.7, 1.3))
+        except Exception:
+            log.exception("Ошибка перепроверки #%s", num)
+        finally:
+            with self.lock:
+                self.recheck = None
+                if left:
+                    self.leftovers[num] = {"target": target, "ids": left}
+                else:
+                    self.leftovers.pop(num, None)
+        lines = [f"🔁 Перепроверка поиска #{num} ({target.name}, {fmt_date(target.aktiv_seit)})"
+                 f"{note_suffix(target.note)}",
+                 f"Открылись: {task['fixed']} из {len(task['ids'])}" + (f", снова не открылись: {len(left)}" if left
+                                                                       else " — все проверены ✅")]
+        if matches:
+            lines += self._matches_lines(matches)
+        buttons = [[btn(f"🔁 Ещё раз ({len(left)} ID)", f"j:re:{num}"), btn("🗑 Забыть", f"j:rmre:{num}")]] \
+            if left else None
+        self.broadcast("\n".join(lines), buttons)
 
     def all_runs_action(self, action: str) -> None:
         for num in list(self.runs):
@@ -1667,13 +1809,15 @@ class Bot:
         parts = ["📊 Статус"]
         active, queued = self.active_runs(), self.queued_runs()
         if active or queued:
-            parts.append(f"Поисков идёт: {len(active)}, ждут: {len(queued)}")
+            parts.append(f"Поисков идёт: {len(active)} из {self.parallel_limit}, в корзине: {len(queued)} "
+                         f"из {self.cfg['max_queue']}")
             parts += ["  " + self._run_line(r) for r in active + queued]
             left = sum(max(0, (r.job.last or 0) - (r.job.cursor or r.job.first or 0) + 1)
                        for r in active if r.job.total and not r.pause.is_set())
-            rps = getattr(self.fetcher, "total_rps", self.cfg["requests_per_second"])
+            real = getattr(self.fetcher, "current_rate", lambda: 0.0)()
+            rps = real or getattr(self.fetcher, "total_rps", self.cfg["requests_per_second"])
             if left:
-                parts.append(f"Осталось перебрать {left:,} ID ≈ {left / max(1.0, rps) / 60:.0f} мин на всё")
+                parts.append(f"Осталось перебрать {left:,} ID ≈ {left / max(0.5, rps) / 60:.0f} мин на всё")
         else:
             parts.append("Сейчас поисков нет.")
         paused = getattr(self.fetcher, "paused_for", lambda: 0)()
@@ -1681,15 +1825,23 @@ class Bot:
             parts.append(f"⛔ Автопауза из-за блокировки: ещё {paused // 60 + 1} мин")
         s = getattr(self.fetcher, "stats", None)
         if s:
-            parts.append(f"Запросов: {s['requests']:,} (блокировок {s['blocked']}, ошибок {s['errors']})")
+            parts.append(f"Запросов: {s['requests']:,}; блокировок (403/429, с повтором): {s['blocked']}; "
+                         f"не открылись даже после повторов: {s['errors']}")
+            kinds = getattr(self.fetcher, "errors_summary", lambda: "")()
+            if kinds:
+                parts.append(f"  причины: {kinds}")
         lanes = getattr(self.fetcher, "lanes", None) or []
         n_proxy = len(proxy_list(self.cfg))
         total = self.cfg["requests_per_second"] * max(1, n_proxy)
-        workers = getattr(self.fetcher, "worker_count", lambda: self.cfg["workers"])()
-        parts.append(f"Скорость: до {total} запр/с ({self.cfg['requests_per_second']}/с × "
+        workers = getattr(self.fetcher, "worker_count", lambda: 6)()
+        real = getattr(self.fetcher, "current_rate", lambda: 0.0)()
+        parts.append(f"Скорость: сейчас {real:.1f} запр/с, лимит {total} ({self.cfg['requests_per_second']}/с × "
                      f"{n_proxy or 1} {'прокси' if n_proxy else 'прямое соединение'}), потоков {workers}")
-        if lanes and any(lane.pause_until > time.monotonic() for lane in lanes):
+        if len(lanes) > 1 or (lanes and any(lane.pause_until > time.monotonic() for lane in lanes)):
             parts += ["  " + x for x in self.fetcher.lanes_info()]
+        if self.leftovers:
+            parts.append(f"⚠️ Ждут перепроверки: {sum(len(i['ids']) for i in self.leftovers.values())} ID "
+                         f"— «{M_TASKS}»")
         parts.append(f"Мониторинг: {len(self.state['watch'])} акк. · дат в базе: {len(self.anchors):,}")
         return "\n".join(parts)
 
@@ -1698,21 +1850,34 @@ class Bot:
                   msg_id)
 
     def screen_tasks(self, chat_id: str, msg_id: Optional[int] = None) -> None:
-        runs = self.active_runs() + self.queued_runs()
-        lines = ["📋 Задачи"]
+        active, queued = self.active_runs(), self.queued_runs()
+        lines = ["📋 Задачи", f"\n▶️ В работе: {len(active)} из {self.parallel_limit}"]
         rows: list = []
-        if not runs:
-            lines.append("Сейчас поисков нет. Пришли скриншот или нажми «Поиск по имени».")
-        for run in runs:
-            lines.append(self._run_line(run))
-            if run.thread is None:
-                rows.append([btn(f"🗑 Убрать #{run.num}", f"j:stop:{run.num}")])
-            else:
-                rows.append([btn(f"▶️ #{run.num}", f"j:resume:{run.num}") if run.pause.is_set()
-                             else btn(f"⏸ #{run.num}", f"j:pause:{run.num}"),
-                             btn(f"⏹ Стоп #{run.num}", f"j:stop:{run.num}")])
-        if runs:
-            lines.append("\n⏹ Стоп — поиск завершится сразу, найденное придёт отчётом.")
+        if not active:
+            lines.append("  сейчас ничего — пришли скриншот или нажми «Поиск по имени»")
+        for run in active:
+            lines.append("  " + self._run_line(run))
+            rows.append([btn(f"▶️ #{run.num}", f"j:resume:{run.num}") if run.pause.is_set()
+                         else btn(f"⏸ #{run.num}", f"j:pause:{run.num}"),
+                         btn(f"⏹ Стоп #{run.num}", f"j:stop:{run.num}")])
+        lines.append(f"\n🧺 Корзина: {len(queued)} из {self.cfg['max_queue']}"
+                     + (" — берутся по очереди, как только освобождается слот" if queued else ""))
+        for run in queued:
+            lines.append("  " + self._run_line(run))
+            rows.append([btn(f"🗑 Убрать из корзины #{run.num}", f"j:stop:{run.num}")])
+        if self.recheck:
+            r = self.recheck
+            lines.append(f"\n🔁 Перепроверка #{r['num']}: {r['done']}/{len(r['ids'])}, открылись {r['fixed']}")
+            rows.append([btn(f"⏹ Стоп перепроверки #{r['num']}", f"j:restop:{r['num']}")])
+        waiting = [(n, it) for n, it in self.leftovers.items() if not self.recheck or self.recheck["num"] != n]
+        if waiting:
+            lines.append("\n⚠️ Не открылись (ошибки/блокировки), ждут перепроверки:")
+            for n, it in waiting:
+                lines.append(f"  #{n} {it['target'].name} / {fmt_date(it['target'].aktiv_seit)} — {len(it['ids'])} ID")
+                rows.append([btn(f"🔁 Перепроверить #{n} ({len(it['ids'])})", f"j:re:{n}"),
+                             btn("🗑", f"j:rmre:{n}")])
+        rows.append([btn(("✅" if k == self.parallel_limit else "") + f"{k} парал.", f"j:par:0:{k}")
+                     for k in (1, 2, 3, 4, 5)])
         rows.append([btn("🔄 Обновить", "t:refresh"), btn(M_SEARCH, "c:new")])
         self.show(chat_id, "\n".join(lines), rows, msg_id)
 
@@ -1977,7 +2142,7 @@ class Bot:
     def screen_proxy(self, chat_id: str, msg_id: Optional[int] = None, note: str = "") -> None:
         proxies = proxy_list(self.cfg)
         rps = self.cfg["requests_per_second"]
-        workers = getattr(self.fetcher, "worker_count", lambda: self.cfg["workers"])()
+        workers = getattr(self.fetcher, "worker_count", lambda: 6)()
         lines = ["🌐 Прокси и скорость"]
         if proxies:
             info = self.fetcher.lanes_info() if hasattr(self.fetcher, "lanes_info") else [mask_proxy(p) for p in proxies]
@@ -2247,7 +2412,7 @@ class Bot:
             note = self.run_action(int(parts[2]), parts[1], uid)
             if note:
                 self.tg.send(chat_id, note)
-            if parts[1] != "ok":
+            if parts[1] in ("pause", "resume", "stop", "restop", "rmre", "par"):
                 self.screen_tasks(chat_id, msg_id)
         elif kind == "s":
             self.screen_status(chat_id, msg_id)

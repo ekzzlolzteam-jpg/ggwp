@@ -1,5 +1,5 @@
 {
-  "_comment": "Скопируй в config.json (или запусти скрипт — он спросит сам). proxy_urls — список прокси, скорость складывается; requests_per_second — лимит на ОДИН прокси; workers 0 = авто.",
+  "_comment": "Скопируй в config.json (или запусти скрипт — он спросит сам). proxy_urls — список прокси, скорость складывается; requests_per_second — лимит на ОДИН прокси; потоки подбираются сами.",
   "telegram_token": "ВСТАВЬ_ТОКЕН_ОТ_BOTFATHER",
   "allowed_chat_ids": [
     "123456789"
@@ -7,7 +7,6 @@
   "proxy_url": "",
   "proxy_urls": [],
   "requests_per_second": 8,
-  "workers": 0,
   "request_timeout": 15,
   "max_retries": 4,
   "block_threshold": 20,
@@ -30,7 +29,9 @@
   "chunk_size": 200,
   "name_fuzzy_threshold": 0.85,
   "auto_watch_on_match": true,
-  "max_parallel_searches": 5,
+  "parallel_searches": 3,
+  "max_queue": 15,
+  "recheck_delay_seconds": 3,
   "monitor_every_check": false,
   "monitor_minutes_min": 10,
   "monitor_minutes_max": 30,

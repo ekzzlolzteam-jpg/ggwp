@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import kleinanzeigen_bot as kb  # noqa: E402
 
 CFG = dict(kb.DEFAULT_CONFIG, requests_per_second=1000, workers=4, chunk_size=50, max_retries=2,
-           locate_max_requests=800, boundary_precision=30, seed_anchors=[])
+           locate_max_requests=800, boundary_precision=30, seed_anchors=[], recheck_delay_seconds=0)
 
 PROFILE_HTML = """<html><head><title>Bestandsliste von Manuela | kleinanzeigen</title></head><body>
 <section class="userprofile">
@@ -180,7 +180,7 @@ class TestLocator(unittest.TestCase):
                                   (site.start_id + 390 * 3000 + 1, site.date_of(site.start_id + 390 * 3000 + 1))])
             before = len(store)
             self.check(site, store, date(2017, 3, 1))
-            self.assertGreater(len(store), before, "база якорей должна пополняться")
+            self.assertEqual(len(store), before, "поиск диапазона не засоряет базу дат")
 
     def test_empty_anchors(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -208,9 +208,8 @@ class TestScanner(unittest.TestCase):
         job, found = self.run_scan(site, target)
         levels = {m["user_id"]: m["level"] for m in job.matches}
         self.assertEqual(levels, {ids[100]: "conflict", ids[1500]: "exact"})
-        # 10% запросов падает, а у фейка нет встроенных повторов — после 3 кругов перепроверки
-        # должно остаться ~0 ошибок, и ни один ID не должен «потеряться»
-        self.assertLessEqual(len(job.error_ids), 3)
+        # 10% запросов падает (у фейка нет повторов): такие ID не теряются, а ждут медленной перепроверки
+        self.assertGreater(len(job.error_ids), 0)
         self.assertEqual(job.checked + len(job.error_ids), job.total)
 
     def test_scans_to_the_end_and_reports_every_match(self):
@@ -498,24 +497,48 @@ class TestButtonsUI(UIBase):
         self.assertEqual(self.bot.runs, {}, "закончившийся поиск забыт")
         state = json.loads((Path(self.tmp.name) / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(set(state), {"offset", "watch", "ui"}, "на диске только мониторинг и ввод")
+        # ID, которые не открылись, ждут медленной перепроверки по кнопке
+        left = len(self.bot.leftovers[1]["ids"])
+        self.assertGreater(left, 0)
+        report = next(t for t in self.tg.sent if "Поиск #1 завершён" in t)
+        self.assertIn(f"{left} ID не открылись", report)
         self.text(kb.M_TASKS)
-        self.assertIn("поисков нет", self.tg.sent[-1])
+        self.assertIn("ждут перепроверки", self.tg.sent[-1])
+        self.press("Перепроверить #1")
+        for _ in range(500):
+            if self.bot.recheck is None and any("Перепроверка поиска #1" in t for t in self.tg.sent):
+                break
+            time.sleep(0.01)
+        done = next(t for t in self.tg.sent if "Перепроверка поиска #1" in t)
+        self.assertIn("Открылись:", done)
+        self.assertLessEqual(len(self.bot.leftovers.get(1, {}).get("ids", [])), max(2, left // 10))
 
-    def test_five_screens_run_in_parallel(self):
+    def test_three_in_work_rest_in_basket(self):
         self.site.gate = threading.Event()                # запросы «висят», поиски точно идут одновременно
         for i in range(5):
             self.start_search(f"User{i} 0{i + 1}.10.2016")
-        self.assertEqual(len(self.bot.active_runs()), 5)
+        self.assertEqual(len(self.bot.active_runs()), 3, "одновременно — только 3")
+        self.assertEqual(len(self.bot.queued_runs()), 2, "остальные — в корзине")
+        self.assertIn("Поиск #4 в корзине (1/15)", "\n".join(self.tg.sent))
+        for i in range(5, 18):                            # заполняем корзину до 15
+            self.start_search(f"More{i} 1{i % 9}.10.2016")
+        self.assertEqual(len(self.bot.queued_runs()), 15)
+        self.start_search("Overflow 20.10.2016")
+        self.assertIn("Корзина полна (15/15)", "\n".join(self.tg.sent))
         self.text(kb.M_TASKS)
-        for i in range(1, 6):
-            self.assertIn(f"#{i} User{i - 1}", self.tg.sent[-1])
-        self.start_search("Extra 07.10.2016")             # шестой — сверх лимита 5, ждёт
-        self.assertIn("Поиск #6 ждёт", "\n".join(self.tg.sent))
-        self.assertEqual(len(self.bot.queued_runs()), 1)
+        self.assertIn("В работе: 3 из 3", self.tg.sent[-1])
+        self.assertIn("Корзина: 15 из 15", self.tg.sent[-1])
+        # убрать из корзины и поменять число параллельных кнопкой
+        self.press("Убрать из корзины #18")
+        self.assertEqual(len(self.bot.queued_runs()), 14)
+        self.text(kb.M_TASKS)
+        self.press("2 парал.")
+        self.assertEqual(self.bot.cfg["parallel_searches"], 2)
+        self.press("3 парал.")
         self.site.gate.set()
         self.wait_all()
-        reports = [t for t in self.tg.sent if "завершён" in t]
-        self.assertEqual(len(reports), 6, "все шесть поисков дошли до конца")
+        self.assertEqual(sum("завершён" in t for t in self.tg.sent), 17, "все из корзины отработали сами")
+        self.assertTrue(any("Из корзины в работу" in t for t in self.tg.sent))
 
     def test_stop_button_and_this_is_him(self):
         d, d2 = date(2016, 10, 1), date(2016, 10, 5)
@@ -710,7 +733,7 @@ class TestSpeed(unittest.TestCase):
         self.assertEqual(f.worker_count(), 24)              # 10/с × 1.2 с × 2
         f.set_proxies(["socks5://a:1@1.1.1.1:1", "socks5://b:1@2.2.2.2:1", "socks5://c:1@3.3.3.3:1"])
         self.assertEqual(f.worker_count(), 60)              # 30/с × 1 с × 2
-        self.assertEqual(kb.Fetcher(dict(CFG, workers=7)).worker_count(), 7)
+        self.assertNotEqual(kb.Fetcher(dict(CFG, workers=7)).worker_count(), 7, "ручные потоки больше не нужны")
 
     def test_found_date_goes_only_to_db(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -811,3 +834,26 @@ class TestNotes(UIBase):
         t = kb.parse_target_text("Имя: Willi\nДата регистрации: 01.10.2016\nЗаметка: Петя")
         self.assertEqual(t.note, "Петя")
         self.assertEqual(kb.Target.from_dict(t.to_dict()).note, "Петя")
+
+
+class TestAnchorBase(unittest.TestCase):
+    def test_one_record_per_date_and_compaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "known_accounts.txt"
+            # старый «раздутый» файл: много записей на одни и те же даты
+            path.write_text("".join(f"{40000000 + i};0{1 + i % 3}.10.2016\n" for i in range(300)), encoding="utf-8")
+            store = kb.AnchorStore(path)
+            self.assertEqual(len(store), 3, "по одной записи на дату")
+            self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 3, "файл сжат")
+            self.assertFalse(store.add(40999999, date(2016, 10, 1)), "дата уже есть — не добавляем")
+            self.assertTrue(store.add(41000000, date(2016, 10, 9)))
+            self.assertEqual(len(kb.AnchorStore(path)), 4)
+
+    def test_repo_base_is_not_duplicated_in_data_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "known_accounts"
+            base.write_text("46211501;24.03.2017\n", encoding="utf-8")
+            own = Path(tmp) / "known_accounts.txt"
+            own.write_text("46211999;24.03.2017\n46300000;25.03.2017\n", encoding="utf-8")
+            store = kb.AnchorStore(own, extra_files=[base])
+            self.assertEqual(store.items(), [(46211501, date(2017, 3, 24)), (46300000, date(2017, 3, 25))])
