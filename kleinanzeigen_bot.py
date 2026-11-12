@@ -236,8 +236,12 @@ def _clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", html_lib.unescape(s or "")).strip()
 
 
+_NAME_CLASS_RE = re.compile(r"userprofile-+name")
+
+
 def extract_name(soup: BeautifulSoup, raw_html: str) -> Optional[str]:
-    el = soup.select_one(".userprofile--name, [class*='userprofile--name'], [class*='userprofile-name']")
+    # прямой поиск тега быстрее CSS-селектора (это выполняется для каждого из ~25 тыс. ID)
+    el = soup.find("h2", class_="userprofile--name") or soup.find(class_=_NAME_CLASS_RE)
     if el:
         t = re.sub(r"^\s*Profil\s+von\s*:?\s*", "", el.get_text(" ", strip=True), flags=re.I)
         if t:
@@ -312,7 +316,7 @@ BADGE_LEVEL_KEY = {"satisfaction": {2: "top", 1: "ok", 0: "naja"},
 def extract_badges(soup: BeautifulSoup) -> Optional[dict]:
     """Плашки из разметки <button class="userbadge" data-badge-name=... data-badge-level=...>.
     None — если таких элементов нет (тогда ищем по тексту)."""
-    elements = soup.select("[data-badge-name]")
+    elements = soup.find_all(attrs={"data-badge-name": True})
     if not elements:
         return None
     res: dict[str, str] = {}
@@ -355,7 +359,8 @@ def normalize_html(raw_html: str) -> str:
     return _CHARREF_RE.sub(fix, raw_html).replace("&#", "&amp;#")
 
 
-def parse_profile_html(raw_html: str, user_id: int) -> Profile:
+def parse_profile_html(raw_html: str, user_id: int, listings: bool = True) -> Profile:
+    """listings=False — не собирать список объявлений (при переборе он не нужен, нужен мониторингу)."""
     raw_html = normalize_html(raw_html)
     soup = BeautifulSoup(raw_html, "html.parser")
     text = soup.get_text(" ", strip=True)
@@ -375,7 +380,8 @@ def parse_profile_html(raw_html: str, user_id: int) -> Profile:
     prof.online_ads = _int_after(r"(\d+)\s+Anzeigen?\s+online", src)
     prof.total_ads = _int_after(r"(\d+)\s+gesamt", src)
     prof.followers = _int_after(r"(\d+)\s+Follower", src)
-    prof.listings = extract_listings(soup)
+    if listings:
+        prof.listings = extract_listings(soup)
     return prof
 
 
@@ -561,7 +567,10 @@ class Fetcher:
             " Потом продолжу на пониженной скорости, ничего делать не нужно."
         self.notify(f"⛔ Сайт режет запросы через {lane.label} (403/429). Пауза для него {minutes} мин.{tail}")
 
-    def get(self, user_id: int, stop: Optional[threading.Event] = None, retries: Optional[int] = None) -> FetchResult:
+    supports_light = True     # умеет get(..., listings=False) — для перебора
+
+    def get(self, user_id: int, stop: Optional[threading.Event] = None, retries: Optional[int] = None,
+            listings: bool = True) -> FetchResult:
         url = PROFILE_URL.format(uid=user_id)
         last = FetchResult("error", error="no attempts")
         for attempt in range((self.cfg["max_retries"] if retries is None else retries) + 1):
@@ -589,7 +598,7 @@ class Fetcher:
                     body = resp.text
                     if looks_like_profile(body):
                         try:
-                            prof = parse_profile_html(body, user_id)
+                            prof = parse_profile_html(body, user_id, listings=listings)
                         except Exception as exc:   # кривая страница — ошибка одного ID, а не всего поиска
                             log.warning("Не удалось разобрать страницу %s: %s: %s", user_id,
                                         type(exc).__name__, str(exc)[:100])
@@ -1066,6 +1075,8 @@ class Scanner:
             time.sleep(0.5)
 
     def _submit(self, ids: list[int], pool: ThreadPoolExecutor) -> list:
+        if getattr(self.fetcher, "supports_light", False):
+            return [(uid, pool.submit(self.fetcher.get, uid, self.stop, None, False)) for uid in ids]
         return [(uid, pool.submit(self.fetcher.get, uid, self.stop)) for uid in ids]
 
     def _collect(self, job: Job, target: Target, batch: list) -> bool:
@@ -2151,9 +2162,8 @@ class Bot:
                 w["new_ads"] = w.get("new_ads", [])[-300:]
                 # объединяем, а не заменяем: временно скрытое объявление не придёт повторно
                 w["seen"] = sorted(seen | set(current), key=lambda x: int(x) if x.isdigit() else 0)[-3000:]
-                if len(titles) > 3000:
-                    keep = set(w["seen"])
-                    w["titles"] = {k: v for k, v in titles.items() if k in keep}
+                # названия нужны только для объявлений, которые сейчас на странице (ловим замену названия)
+                w["titles"] = {ad_id: titles.get(ad_id, ad.get("title", "")) for ad_id, ad in current.items()}
                 if (manual or self.cfg.get("monitor_every_check")) and not out:
                     out.append(f"✅ {label}: новых объявлений нет (на странице {len(current)}).")
             w["last"] = now
