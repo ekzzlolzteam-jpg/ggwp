@@ -2217,12 +2217,24 @@ class Bot:
                     self.state["watch"][k]["manual"] = True
         self.monitor_wakeup.set()
 
-    def screen_monitor(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+    MONITOR_PAGE = 8      # аккаунтов на странице: у Telegram лимит 100 кнопок на сообщение
+
+    def screen_monitor(self, chat_id: str, msg_id: Optional[int] = None, page: Optional[int] = None) -> None:
         w = self.state["watch"]
         lo, hi = self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"]
-        lines = [f"👁 Мониторинг новых объявлений (каждые {lo}–{hi} мин)"]
-        rows = []
-        for key, item in w.items():
+        keys = list(w)
+        pages = max(1, (len(keys) + self.MONITOR_PAGE - 1) // self.MONITOR_PAGE)
+        u = self.ui(chat_id)
+        page = u.get("mon_page", 0) if page is None else page
+        page = min(max(0, page), pages - 1)
+        u["mon_page"] = page
+        lines = [f"👁 Мониторинг новых объявлений (каждые {lo}–{hi} мин) — аккаунтов: {len(keys)}"]
+        # общие кнопки — наверху, чтобы не терялись под списком аккаунтов
+        rows = [[btn("➕ Добавить", "w:new")] + ([btn(f"🔄 Проверить всех ({len(keys)})", "w:all")] if w else [])]
+        if w:
+            rows.append([btn("📜 Новые объявления всех аккаунтов", "w:ads:*")])
+        for key in keys[page * self.MONITOR_PAGE:(page + 1) * self.MONITOR_PAGE]:
+            item = w[key]
             last = time.strftime("%H:%M", time.localtime(item["last"])) if item.get("last") else "ещё не было"
             lines.append(f"\n• {self.watch_label(key, item)}\n   объявл.: {len(item.get('seen') or [])}, "
                          f"новых замечено: {len(item.get('new_ads') or [])}, последняя проверка: {last}")
@@ -2234,9 +2246,11 @@ class Bot:
             lines.append("Пока никого. Найденные поиском добавляются сами, или нажми «➕ Добавить».")
         else:
             lines.append("\n🔍 проверить сейчас · 📜 все новые объявления (число) · 📝 заметка · 🗑 убрать")
-        rows.append([btn("➕ Добавить", "w:new")] + ([btn("🔄 Проверить всех", "w:all")] if w else []))
-        if w:
-            rows.append([btn("📜 Новые объявления всех аккаунтов", "w:ads:*")])
+        if pages > 1:
+            lines.append(f"Страница {page + 1} из {pages}")
+            rows.append([btn("◀️", f"w:pg:{page - 1}") if page > 0 else btn("·", "noop"),
+                         btn(f"{page + 1}/{pages}", "noop"),
+                         btn("▶️", f"w:pg:{page + 1}") if page < pages - 1 else btn("·", "noop")])
         every = self.cfg.get("monitor_every_check")
         rows.append([btn(f"⏱ Интервал: {lo}–{hi} мин", "w:int"),
                      btn("🔔 О каждой проверке: " + ("вкл" if every else "выкл"), "w:every")])
@@ -2571,6 +2585,9 @@ class Bot:
                                    "Через пробел можно сразу заметку — чей аккаунт:\n12345678 Петя, Audi A4",
                           [[btn("⬅️ Назад", "w:list")]], msg_id)
                 return
+            if act == "pg":
+                self.screen_monitor(chat_id, msg_id, page=int(parts[2]))
+                return
             if act == "ads":
                 keys = list(self.state["watch"]) if parts[2] == "*" else [parts[2]]
                 self.tg.send(chat_id, self.new_ads_text(keys))
@@ -2597,7 +2614,8 @@ class Bot:
                 self.tg.send(chat_id, "🔍 Проверяю…")
             elif act == "all":
                 self.request_check(list(self.state["watch"]))
-                self.tg.send(chat_id, "🔍 Проверяю всех…")
+                self.tg.send(chat_id, f"🔍 Проверяю все {len(self.state['watch'])} аккаунтов — по каждому придёт "
+                                      f"результат: новые объявления или «новых нет».")
             elif act == "int":
                 self.screen_interval(chat_id, msg_id)
                 return

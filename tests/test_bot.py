@@ -1011,3 +1011,24 @@ class TestDuplicates(UIBase):
         self.wait_all()
         self.start_search("Willi 01.10.2016")                  # после окончания — можно снова
         self.assertIn(4, self.bot.runs)
+
+
+class TestMonitorScreen(unittest.TestCase):
+    def test_many_accounts_paged_and_check_all_on_top(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = kb.Bot(dict(CFG, data_dir=tmp, allowed_chat_ids=["1"], telegram_token="x"))
+            tg = bot.tg = FakeTG()
+            for i in range(40):
+                bot.state["watch"][str(40000000 + i)] = {"name": f"N{i}", "note": "", "seen": [], "next": 9e12,
+                                                         "fails": 0}
+            bot.screen_monitor("1")
+            self.assertIn("Проверить всех (40)", tg.buttons[0][-1]["text"], "кнопка — в первом ряду")
+            self.assertLessEqual(sum(len(r) for r in tg.buttons), 100, "лимит Telegram — 100 кнопок")
+            self.assertLess(len(tg.sent[-1]), 4000)
+            self.assertIn("Страница 1 из 5", tg.sent[-1])
+            bot.handle_callback("1", "w:pg:4", 7)
+            self.assertIn("N39", tg.edits[-1])
+            self.assertNotIn("N0 ", tg.edits[-1])
+            bot.handle_callback("1", "w:all", 7)
+            self.assertTrue(all(w.get("manual") for w in bot.state["watch"].values()), "проверяются все 40")
+            bot.pool.shutdown()
