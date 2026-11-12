@@ -1725,6 +1725,25 @@ class Bot:
             return f"▶️ Поиск #{num} продолжается."
         return ""
 
+    def set_run_note(self, num: int, note: str) -> bool:
+        """Заметка к идущему (или ждущему в корзине) поиску. Переносится и на уже найденные аккаунты."""
+        with self.lock:
+            run = self.runs.get(num)
+            if run is None:
+                return False
+            run.target.note = note
+            run.job.target["note"] = note
+            for m in run.job.matches:
+                if m["level"] in ("exact", "partial"):
+                    if note:
+                        self.notes_by_uid[m["user_id"]] = note
+                    else:
+                        self.notes_by_uid.pop(m["user_id"], None)
+                    key = str(m["user_id"])
+                    if key in self.state["watch"] and not self.state["watch"][key].get("note"):
+                        self.set_watch_note(key, note)      # уже в мониторинге без подписи — подпишем
+        return True
+
     def start_recheck(self, num: int) -> str:
         item = self.leftovers.get(num)
         if not item:
@@ -1803,7 +1822,8 @@ class Bot:
         else:
             st = run.phase
         found = sum(1 for m in job.matches if m["level"] in ("exact", "partial"))
-        return f"#{run.num} {t.name} / {fmt_date(t.aktiv_seit)} — {st}" + (f", найдено {found}" if found else "")
+        return f"#{run.num} {t.name} / {fmt_date(t.aktiv_seit)} — {st}" + (f", найдено {found}" if found else "") \
+            + (f"\n     📝 {t.note}" if t.note else "")
 
     def status_text(self) -> str:
         parts = ["📊 Статус"]
@@ -1855,16 +1875,20 @@ class Bot:
         rows: list = []
         if not active:
             lines.append("  сейчас ничего — пришли скриншот или нажми «Поиск по имени»")
+        else:
+            lines.append("  ⏸ пауза · 📝 заметка (чей аккаунт) · ⏹ стоп")
         for run in active:
             lines.append("  " + self._run_line(run))
             rows.append([btn(f"▶️ #{run.num}", f"j:resume:{run.num}") if run.pause.is_set()
                          else btn(f"⏸ #{run.num}", f"j:pause:{run.num}"),
+                         btn(f"📝 #{run.num}", f"j:note:{run.num}"),
                          btn(f"⏹ Стоп #{run.num}", f"j:stop:{run.num}")])
         lines.append(f"\n🧺 Корзина: {len(queued)} из {self.cfg['max_queue']}"
                      + (" — берутся по очереди, как только освобождается слот" if queued else ""))
         for run in queued:
             lines.append("  " + self._run_line(run))
-            rows.append([btn(f"🗑 Убрать из корзины #{run.num}", f"j:stop:{run.num}")])
+            rows.append([btn(f"📝 #{run.num}", f"j:note:{run.num}"),
+                         btn(f"🗑 Убрать из корзины #{run.num}", f"j:stop:{run.num}")])
         if self.recheck:
             r = self.recheck
             lines.append(f"\n🔁 Перепроверка #{r['num']}: {r['done']}/{len(r['ids'])}, открылись {r['fixed']}")
@@ -2223,7 +2247,7 @@ class Bot:
                 M_STATUS: lambda: self.screen_status(chat_id), M_RESULTS: lambda: self.screen_results(chat_id),
                 M_MONITOR: lambda: self.screen_monitor(chat_id), M_PROXY: lambda: self.screen_proxy(chat_id)}
         if text in menu:
-            if u["step"] in ("proxy", "watch"):
+            if u["step"] in ("proxy", "watch", "watch_note", "run_note"):
                 u["step"] = None
             menu[text]()
             return
@@ -2259,6 +2283,16 @@ class Bot:
                     self.set_watch_note(str(uid), note)
                 self.tg.send(chat_id, "Этот профиль уже в мониторинге" + (" — заметку обновил." if note else "."))
             self.screen_monitor(chat_id)
+        elif step == "run_note":
+            num = u.pop("run_num", None)
+            u["step"] = None
+            note = "" if text.strip() in ("-", "—") else re.sub(r"\s+", " ", text).strip()[:200]
+            if num is not None and self.set_run_note(int(num), note):
+                self.tg.send(chat_id, f"📝 Заметка к поиску #{num} " + (f"сохранена: {note}" if note else "убрана")
+                             + ". Она будет во всех следующих сообщениях по этому поиску.")
+            else:
+                self.tg.send(chat_id, f"Поиск #{num} уже закончен — заметку можно поставить в «{M_MONITOR}» → 📝.")
+            self.screen_tasks(chat_id)
         elif step == "watch_note":
             key = u.pop("watch_key", None)
             u["step"] = None
@@ -2406,8 +2440,24 @@ class Bot:
             self.badge_picker(chat_id, msg_id)
         # --- задачи / статус / результаты ---
         elif kind == "t":
+            if u.get("step") == "run_note":
+                u["step"] = None
             self.screen_tasks(chat_id, msg_id)
         elif kind == "j":       # действия с конкретным поиском: j:<действие>:<номер>[:<ID>]
+            if parts[1] == "note":
+                run = self.runs.get(int(parts[2]))
+                if run is None:
+                    self.tg.send(chat_id, f"Поиск #{parts[2]} уже закончен.")
+                    self.screen_tasks(chat_id, msg_id)
+                    return
+                u["step"], u["run_num"] = "run_note", run.num
+                cur = run.target.note
+                self.show(chat_id, f"📝 Заметка к поиску #{run.num} ({run.target.name}, "
+                                   f"{fmt_date(run.target.aktiv_seit)}) — чей это аккаунт?\n"
+                                   + (f"Сейчас: {cur}\n" if cur else "")
+                                   + "Напиши заметку («-» — убрать). Поиск при этом не останавливается.",
+                          [[btn("⬅️ Назад", "t:refresh")]], msg_id)
+                return
             uid = int(parts[3]) if len(parts) > 3 else None
             note = self.run_action(int(parts[2]), parts[1], uid)
             if note:

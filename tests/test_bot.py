@@ -857,3 +857,70 @@ class TestAnchorBase(unittest.TestCase):
             own.write_text("46211999;24.03.2017\n46300000;25.03.2017\n", encoding="utf-8")
             store = kb.AnchorStore(own, extra_files=[base])
             self.assertEqual(store.items(), [(46211501, date(2017, 3, 24)), (46300000, date(2017, 3, 25))])
+
+
+class TestNoteDuringSearch(UIBase):
+    def test_note_added_while_searching(self):
+        d = date(2016, 10, 1)
+        ids = self.site.ids_on(d)
+        self.site.special[ids[50]] = kb.Profile(ids[50], "Willi", d, {})
+        self.site.special[ids[900]] = kb.Profile(ids[900], "Willi", d, {})
+        hold = threading.Event()
+        self.addCleanup(hold.set)
+        orig_get = self.site.get
+
+        def slow(uid, stop=None):
+            # после первого совпадения перебор «зависает», пока тест не добавит заметку
+            if threading.current_thread().name.startswith("fetch") and ids[50] + 300 < uid <= ids[-1] + 100:
+                while not hold.is_set():
+                    if stop is not None and stop.is_set():
+                        return kb.FetchResult("error", error="stopped")
+                    time.sleep(0.005)
+            return orig_get(uid, stop)
+
+        self.site.get = slow
+        self.start_search("Willi 01.10.2016")              # забыли заметку
+        self.bot.cfg["parallel_searches"] = 1              # второй поиск — в корзину
+        self.start_search("Privat 05.10.2016")
+        for _ in range(500):
+            if any("НАЙДЕН" in t for t in self.tg.sent):
+                break
+            time.sleep(0.01)
+        first = next(t for t in self.tg.sent if "НАЙДЕН" in t)
+        self.assertNotIn("📝", first)
+
+        self.text(kb.M_TASKS)
+        self.assertIn("📝 #1", str(self.tg.buttons))
+        self.assertIn("📝 #2", str(self.tg.buttons))        # и у ждущего в корзине
+        self.press("📝 #1")
+        self.text("Петя, Audi A4")
+        self.assertEqual(self.bot.runs[1].target.note, "Петя, Audi A4")
+        self.assertIn("📝 Петя, Audi A4", self.tg.sent[-1])  # видно в «Задачах»
+        self.assertEqual(self.bot.notes_by_uid[ids[50]], "Петя, Audi A4")  # и у уже найденного
+        self.press("📝 #2")
+        self.text("Аня")
+        self.assertEqual(self.bot.runs[2].target.note, "Аня")
+
+        hold.set()
+        self.wait_all()
+        second = [t for t in self.tg.sent if "НАЙДЕН" in t and "поиск #1" in t][-1]
+        self.assertIn("📝 Петя, Audi A4", second)           # следующие уведомления — с заметкой
+        report = next(t for t in self.tg.sent if "Поиск #1 завершён" in t)
+        self.assertIn("📝 Петя, Audi A4", report)
+        self.assertTrue(any("Поиск #2" in t and "📝 Аня" in t for t in self.tg.sent))
+
+    def test_remove_note_and_finished_search(self):
+        self.site.gate = threading.Event()
+        self.text("Willi 01.10.2016")
+        self.press("📝 Заметка")
+        self.text("Петя")
+        self.press("Искать")
+        self.text(kb.M_TASKS)
+        self.press("📝 #1")
+        self.text("-")
+        self.assertEqual(self.bot.runs[1].target.note, "")
+        self.text(kb.M_TASKS)
+        self.press("📝 #1")
+        self.text(kb.M_STATUS)                            # кнопка меню отменяет ввод заметки
+        self.assertIsNone(self.bot.ui(self.CHAT)["step"])
+        self.assertFalse(self.bot.set_run_note(99, "x"))
