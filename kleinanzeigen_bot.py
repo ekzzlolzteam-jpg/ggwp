@@ -962,6 +962,10 @@ class Target:
         return "\n".join(lines)
 
 
+def _norm_title(title: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", title or "")).strip().casefold()
+
+
 def note_suffix(note: Optional[str]) -> str:
     return f"\n📝 {note}" if note else ""
 
@@ -1541,9 +1545,26 @@ class Bot:
     def parallel_limit(self) -> int:
         return max(1, int(self.cfg["parallel_searches"]))
 
+    def find_duplicate(self, name: Optional[str], aktiv_seit: Optional[date]) -> Optional[SearchRun]:
+        """Тот же аккаунт (имя + дата регистрации) уже ищется или ждёт в корзине?"""
+        if not name or not aktiv_seit:
+            return None
+        for run in self.runs.values():
+            if run.target.aktiv_seit == aktiv_seit and names_equal(run.target.name, name):
+                return run
+        return None
+
+    def duplicate_warning(self, run: SearchRun) -> str:
+        where = "уже ищется" if run.thread is not None else "уже ждёт в корзине"
+        return f"⚠️ Дубль! {run.target.name} / {fmt_date(run.target.aktiv_seit)} {where} — поиск #{run.num}." \
+               f"{note_suffix(run.target.note)}\nВторой такой же поиск не запускаю."
+
     def submit_search(self, target: Target) -> str:
         """Запускает поиск, если есть свободный слот (parallel_searches), иначе кладёт в корзину."""
         with self.lock:
+            dup = self.find_duplicate(target.name, target.aktiv_seit)
+            if dup is not None:
+                return self.duplicate_warning(dup)
             if len(self.active_runs()) >= self.parallel_limit and \
                     len(self.queued_runs()) >= int(self.cfg["max_queue"]):
                 return f"🧺 Корзина полна ({self.cfg['max_queue']}/{self.cfg['max_queue']}). Дождись, пока " \
@@ -1950,6 +1971,11 @@ class Bot:
                  [btn("📝 Заметка", "c:note"), btn("❌ Отмена", "c:cancel")]]
         hint = "\n\nВсё верно? Жми «🔍 Искать» или исправь кнопками." if ready else \
             "\n\nНе хватает имени или даты — задай кнопками ниже."
+        dup = self.find_duplicate(d.get("name"), parse_date(d.get("aktiv_seit") or "")) if ready else None
+        if dup is not None:
+            hint = "\n\n" + self.duplicate_warning(dup).replace("Второй такой же поиск не запускаю.",
+                                                               "Это дубль скриншота — искать второй раз не нужно.")
+            rows = rows[1:]                        # без кнопки «Искать»
         self.show(chat_id, f"{title}:\n\n{self.draft_text(d)}{hint}", rows, msg_id)
 
     def ask_note(self, chat_id: str, msg_id: Optional[int] = None) -> None:
@@ -2022,6 +2048,13 @@ class Bot:
             return
         target = Target(d["name"], date_, dict(d.get("badges") or {}), d.get("followers"), d.get("online_ads"),
                         note=(d.get("note") or "").strip())
+        dup = self.find_duplicate(target.name, target.aktiv_seit)
+        if dup is not None:
+            self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
+            if msg_id:
+                self.tg.edit(chat_id, msg_id, f"🚫 Не запущено:\n\n{self.draft_text(target.to_dict())}")
+            self.tg.send(chat_id, self.duplicate_warning(dup), [[btn("📋 Задачи", "t:refresh")]])
+            return
         self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
         if msg_id:
             self.tg.edit(chat_id, msg_id, f"✅ Принято:\n\n{self.draft_text(target.to_dict())}")
@@ -2089,25 +2122,65 @@ class Bot:
             w["name"] = w.get("name") or prof.name or ""
             label = self.watch_label(key, w)
             current = prof.listings
+            titles = w.setdefault("titles", {})          # ID объявления -> название (видели последним)
             if w["seen"] is None:
                 w["seen"] = sorted(current)
+                titles.update({ad_id: ad.get("title", "") for ad_id, ad in current.items()})
                 out.append(f"📋 {label}: сейчас {len(current)} объявл. — запомнил, буду присылать только новые.")
             else:
                 seen = set(w["seen"])
+                fresh = []
                 for ad_id, ad in current.items():
-                    if ad_id in seen:
-                        continue
-                    out.append(f"🆕 Новое объявление у {label}\n\n{ad['title'] or 'без названия'}"
+                    title = ad.get("title", "")
+                    if ad_id not in seen:
+                        fresh.append((ad_id, ad, ""))                    # новое объявление (новый ID)
+                    elif ad_id in titles and _norm_title(title) and \
+                            _norm_title(title) != _norm_title(titles[ad_id]):
+                        fresh.append((ad_id, ad, titles[ad_id]))         # то же ID, но другое название
+                    titles.setdefault(ad_id, title)
+                for ad_id, ad, old_title in fresh:
+                    titles[ad_id] = ad.get("title", "")
+                    w.setdefault("new_ads", []).append({
+                        "id": ad_id, "title": ad.get("title", ""), "price": ad.get("price", ""),
+                        "url": ad.get("url", ""), "at": now, "was": old_title})
+                    head = f"🆕 Новое объявление у {label}" if not old_title else \
+                        f"✏️ Объявление заменено у {label}\nбыло: {old_title}"
+                    out.append(f"{head}\n\n{ad.get('title') or 'без названия'}"
                                + (f"\n💶 {ad['price']}" if ad.get("price") else "")
-                               + f"\n{ad['url']}\nПрофиль: {PROFILE_URL.format(uid=key)}")
+                               + f"\n{ad.get('url', '')}\nПрофиль: {PROFILE_URL.format(uid=key)}")
+                w["new_ads"] = w.get("new_ads", [])[-300:]
                 # объединяем, а не заменяем: временно скрытое объявление не придёт повторно
                 w["seen"] = sorted(seen | set(current), key=lambda x: int(x) if x.isdigit() else 0)[-3000:]
+                if len(titles) > 3000:
+                    keep = set(w["seen"])
+                    w["titles"] = {k: v for k, v in titles.items() if k in keep}
                 if (manual or self.cfg.get("monitor_every_check")) and not out:
                     out.append(f"✅ {label}: новых объявлений нет (на странице {len(current)}).")
             w["last"] = now
             lo, hi = self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"]
             w["next"] = now + random.uniform(lo, hi) * 60
         return out
+
+    def new_ads_text(self, keys: list[str]) -> str:
+        """Список всех новых объявлений, замеченных после того, как аккаунт встал в мониторинг."""
+        blocks = []
+        for key in keys:
+            w = self.state["watch"].get(key)
+            if w is None:
+                continue
+            ads = w.get("new_ads") or []
+            head = f"📜 {self.watch_label(key, w)} — новых объявлений: {len(ads)}"
+            if not ads:
+                blocks.append(head + "\n   пока ни одного нового с момента добавления в мониторинг")
+                continue
+            lines = [head]
+            for i, ad in enumerate(ads, 1):
+                when = time.strftime("%d.%m %H:%M", time.localtime(ad.get("at", 0)))
+                was = f" (вместо «{ad['was']}»)" if ad.get("was") else ""
+                lines.append(f"{i}. {when} — {ad.get('title') or 'без названия'}{was}"
+                             + (f" — {ad['price']}" if ad.get("price") else "") + f"\n   {ad.get('url', '')}")
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks) or "В мониторинге никого нет."
 
     def monitor_loop(self) -> None:
         while True:
@@ -2116,8 +2189,11 @@ class Bot:
                 for key in due:
                     messages = self.check_watch(key)
                     self.save()
+                    n = len(self.state["watch"].get(key, {}).get("new_ads") or [])
                     for text in messages:
-                        self.broadcast(text)
+                        new_ad = text.startswith(("🆕", "✏️"))
+                        self.broadcast(text, [[btn(f"📜 Все новые у этого аккаунта ({n})", f"w:ads:{key}")]]
+                                       if new_ad else None)
             except Exception:
                 log.exception("Ошибка мониторинга")
             self.monitor_wakeup.wait(15)
@@ -2139,15 +2215,18 @@ class Bot:
         for key, item in w.items():
             last = time.strftime("%H:%M", time.localtime(item["last"])) if item.get("last") else "ещё не было"
             lines.append(f"\n• {self.watch_label(key, item)}\n   объявл.: {len(item.get('seen') or [])}, "
-                         f"последняя проверка: {last}")
+                         f"новых замечено: {len(item.get('new_ads') or [])}, последняя проверка: {last}")
             short = item.get("note") or item.get("name") or key
-            rows.append([btn(f"🔍 {short[:24]}", f"w:chk:{key}"), btn("📝", f"w:note:{key}"),
-                         btn("🗑", f"w:del:{key}")])
+            n_new = len(item.get("new_ads") or [])
+            rows.append([btn(f"🔍 {short[:20]}", f"w:chk:{key}"), btn(f"📜 {n_new}", f"w:ads:{key}"),
+                         btn("📝", f"w:note:{key}"), btn("🗑", f"w:del:{key}")])
         if not w:
             lines.append("Пока никого. Найденные поиском добавляются сами, или нажми «➕ Добавить».")
         else:
-            lines.append("\n📝 — подписать/изменить заметку (чей аккаунт), 🗑 — убрать из мониторинга.")
+            lines.append("\n🔍 проверить сейчас · 📜 все новые объявления (число) · 📝 заметка · 🗑 убрать")
         rows.append([btn("➕ Добавить", "w:new")] + ([btn("🔄 Проверить всех", "w:all")] if w else []))
+        if w:
+            rows.append([btn("📜 Новые объявления всех аккаунтов", "w:ads:*")])
         every = self.cfg.get("monitor_every_check")
         rows.append([btn(f"⏱ Интервал: {lo}–{hi} мин", "w:int"),
                      btn("🔔 О каждой проверке: " + ("вкл" if every else "выкл"), "w:every")])
@@ -2481,6 +2560,10 @@ class Bot:
                 self.show(chat_id, "➕ Пришли ID пользователя или ссылку на профиль (…userId=12345).\n"
                                    "Через пробел можно сразу заметку — чей аккаунт:\n12345678 Петя, Audi A4",
                           [[btn("⬅️ Назад", "w:list")]], msg_id)
+                return
+            if act == "ads":
+                keys = list(self.state["watch"]) if parts[2] == "*" else [parts[2]]
+                self.tg.send(chat_id, self.new_ads_text(keys))
                 return
             if act == "note":
                 key = parts[2]

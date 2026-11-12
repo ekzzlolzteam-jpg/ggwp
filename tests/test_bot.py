@@ -924,3 +924,90 @@ class TestNoteDuringSearch(UIBase):
         self.text(kb.M_STATUS)                            # кнопка меню отменяет ввод заметки
         self.assertIsNone(self.bot.ui(self.CHAT)["step"])
         self.assertFalse(self.bot.set_run_note(99, "x"))
+
+
+class TestMonitorAds(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bot = kb.Bot(dict(CFG, data_dir=self.tmp.name, allowed_chat_ids=["1"], telegram_token="x"))
+        self.bot.tg = self.tg = FakeTG()
+        self.pages = []
+        self.bot.fetcher = type("F", (), {"get": lambda _s, uid, stop=None: self.pages.pop(0)})()
+        self.bot.state["watch"]["5"] = {"name": "Willi", "note": "Петя", "seen": None, "next": 0, "fails": 0}
+
+    def tearDown(self):
+        self.bot.pool.shutdown()
+        self.tmp.cleanup()
+
+    def page(self, ads):
+        return kb.FetchResult("ok", profile=kb.Profile(5, "Willi", listings={
+            a: {"title": t, "url": f"https://www.kleinanzeigen.de/s-anzeige/x/{a}", "price": "50 €"}
+            for a, t in ads.items()}))
+
+    def check(self, ads):
+        self.pages.append(self.page(ads))
+        return self.bot.check_watch("5")
+
+    def test_dyson_deleted_nintendo_posted(self):
+        self.check({})                                         # было 0 объявлений
+        new1 = self.check({"1001": "Dyson V11"})               # стало 1 — Dyson
+        self.assertIn("🆕", new1[0])
+        self.assertIn("Dyson", new1[0])
+        new2 = self.check({"1002": "Nintendo Switch"})         # Dyson удалил, залил Nintendo — снова 1
+        self.assertEqual(len(new2), 1, "количество то же, но объявление новое — должно прийти")
+        self.assertIn("Nintendo", new2[0])
+
+    def test_same_ad_id_new_title(self):
+        self.check({"1001": "Dyson V11"})
+        msg = self.check({"1001": "Nintendo Switch"})          # отредактировал: тот же ID, другое название
+        self.assertEqual(len(msg), 1)
+        self.assertIn("✏️ Объявление заменено", msg[0])
+        self.assertIn("было: Dyson V11", msg[0])
+        self.assertEqual(self.check({"1001": "Nintendo  switch"}), [], "регистр/пробелы — не замена")
+
+    def test_list_of_all_new_ads_by_button(self):
+        self.check({"1": "Altes"})                             # было на момент добавления — не «новое»
+        self.check({"1": "Altes", "2": "Dyson V11"})
+        self.check({"1": "Altes", "3": "Nintendo Switch"})
+        self.assertEqual([a["title"] for a in self.bot.state["watch"]["5"]["new_ads"]], ["Dyson V11", "Nintendo Switch"])
+        self.bot.screen_monitor("1")
+        self.assertIn("📜 2", str(self.tg.buttons))
+        self.bot.handle_callback("1", "w:ads:5", 7)
+        text = self.tg.sent[-1]
+        self.assertIn("новых объявлений: 2", text)
+        self.assertIn("📝 Петя", text)
+        self.assertIn("1. ", text)
+        self.assertIn("Dyson V11", text)
+        self.assertIn("2. ", text)
+        self.assertIn("Nintendo Switch", text)
+        self.assertNotIn("Altes", text)
+        self.bot.handle_callback("1", "w:ads:*", 7)            # список по всем аккаунтам
+        self.assertIn("Nintendo Switch", self.tg.sent[-1])
+
+    def test_old_state_without_titles_does_not_spam(self):
+        w = self.bot.state["watch"]["5"]
+        w["seen"] = ["1001"]                                   # формат прошлой версии: только ID
+        self.assertEqual(self.check({"1001": "Dyson V11"}), [])
+        self.assertIn("✏️", self.check({"1001": "Nintendo Switch"})[0])
+
+
+class TestDuplicates(UIBase):
+    def test_same_account_twice(self):
+        self.site.gate = threading.Event()
+        self.bot.cfg["parallel_searches"] = 1
+        self.start_search("Willi 01.10.2016")                  # #1 в работе
+        self.start_search("Anna 02.10.2016")                   # #2 в корзине
+        self.text("willi 01.10.2016 top")                      # дубль #1 (регистр/плашки не важны)
+        self.assertIn("⚠️ Дубль", self.tg.sent[-1])
+        self.assertIn("поиск #1", self.tg.sent[-1])
+        self.assertNotIn("🔍 Искать", str(self.tg.buttons), "кнопки «Искать» у дубля нет")
+        self.start_search("Anna 02.10.2016")                   # дубль того, что в корзине
+        joined = "\n".join(self.tg.sent)
+        self.assertIn("уже ждёт в корзине — поиск #2", joined)
+        self.assertEqual(sorted(self.bot.runs), [1, 2], "дубли не добавились")
+        self.start_search("Willi 03.10.2016")                  # то же имя, другая дата — не дубль
+        self.assertEqual(sorted(self.bot.runs), [1, 2, 3])
+        self.site.gate.set()
+        self.wait_all()
+        self.start_search("Willi 01.10.2016")                  # после окончания — можно снова
+        self.assertIn(4, self.bot.runs)
