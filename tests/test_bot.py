@@ -992,6 +992,27 @@ class TestMonitorAds(unittest.TestCase):
         self.bot.handle_callback("1", "w:ads:*", 7)            # список по всем аккаунтам
         self.assertIn("Nintendo Switch", self.tg.sent[-1])
 
+    def test_active_accounts_button(self):
+        self.bot.state["watch"]["6"] = {"name": "Quiet", "note": "", "seen": ["9"], "next": 9e12, "fails": 0}
+        self.bot.handle_callback("1", "w:active", 7)
+        self.assertIn("Активных пока нет", self.tg.sent[-1])
+        self.check({"1": "Altes"})                             # первая проверка — не активность
+        self.bot.handle_callback("1", "w:active", 7)
+        self.assertIn("Активных пока нет", self.tg.sent[-1])
+        self.check({"1": "Altes", "2": "Dyson V11"})           # залил новое
+        self.check({"1": "Altes", "2": "Nintendo Switch"})     # заменил
+        self.bot.screen_monitor("1")
+        self.assertIn("🔥 Активные (1)", str(self.tg.buttons))
+        self.bot.handle_callback("1", "w:active", 7)
+        text = self.tg.sent[-1]
+        self.assertIn("1 из 2", text)
+        self.assertIn("Willi", text)
+        self.assertIn("📝 Петя", text)
+        self.assertIn("🆕 1 · ✏️ 1", text)
+        self.assertIn("Nintendo Switch", text)
+        self.assertNotIn("Quiet", text)
+        self.assertIn("w:card:5", str(self.tg.buttons))
+
     def test_old_state_without_titles_does_not_spam(self):
         w = self.bot.state["watch"]["5"]
         w["seen"] = ["1001"]                                   # формат прошлой версии: только ID

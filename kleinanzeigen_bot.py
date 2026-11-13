@@ -2214,6 +2214,36 @@ class Bot:
             blocks.append("\n".join(lines))
         return "\n\n".join(blocks) or "В мониторинге никого нет."
 
+    def active_watch_keys(self) -> list[str]:
+        """Аккаунты, которые после добавления в мониторинг хоть раз залили (или заменили) объявление.
+        Сначала — те, кто заливал последним."""
+        active = [k for k, w in list(self.state["watch"].items()) if w.get("new_ads")]
+        return sorted(active, key=lambda k: max(a.get("at", 0) for a in self.state["watch"][k]["new_ads"]),
+                      reverse=True)
+
+    def active_accounts_text(self) -> tuple[str, Optional[list]]:
+        """«🔥 Активные»: кто заливал товар с момента добавления в мониторинг + кнопки на их карточки."""
+        keys = self.active_watch_keys()
+        total = len(self.state["watch"])
+        if not keys:
+            return (f"🔥 Активных пока нет: ни один из {total} аккаунтов не заливал новых объявлений "
+                    f"с момента добавления в мониторинг."), None
+        lines = [f"🔥 Активные аккаунты — заливали товар после начала мониторинга: {len(keys)} из {total}"]
+        buttons = []
+        for i, key in enumerate(keys, 1):
+            w = self.state["watch"][key]
+            ads = w["new_ads"]
+            n_new = sum(1 for a in ads if not a.get("was"))
+            n_repl = len(ads) - n_new
+            last_ad = max(ads, key=lambda a: a.get("at", 0))
+            when = time.strftime("%d.%m %H:%M", time.localtime(last_ad.get("at", 0)))
+            counts = f"🆕 {n_new}" + (f" · ✏️ {n_repl}" if n_repl else "")
+            lines.append(f"\n{i}. {self.watch_label(key, w)}\n   {counts} · последнее {when}: "
+                         f"{last_ad.get('title') or 'без названия'}\n   {PROFILE_URL.format(uid=key)}")
+            buttons.append(btn(f"{i}. {(w.get('note') or w.get('name') or key)[:14]}", f"w:card:{key}"))
+        lines.append("\nНажми на аккаунт — откроется его карточка (там «📜 Новые» — все его объявления).")
+        return "\n".join(lines), chunked(buttons, 3)
+
     def monitor_loop(self) -> None:
         while True:
             try:
@@ -2254,7 +2284,8 @@ class Bot:
         lines = [f"👁 Мониторинг (проверка каждые {lo}–{hi} мин) — аккаунтов: {len(keys)}"]
         rows = [[btn("➕ Добавить", "w:new")] + ([btn(f"🔄 Проверить всех ({len(keys)})", "w:all")] if w else [])]
         if w:
-            rows.append([btn("📜 Новые объявления всех аккаунтов", "w:ads:*")])
+            n_active = len(self.active_watch_keys())
+            rows.append([btn("📜 Все новые объявления", "w:ads:*"), btn(f"🔥 Активные ({n_active})", "w:active")])
         start = page * self.MONITOR_PAGE
         acc_buttons = []
         for i, key in enumerate(keys[start:start + self.MONITOR_PAGE], start + 1):
@@ -2638,6 +2669,10 @@ class Bot:
             if act == "ads":
                 keys = list(self.state["watch"]) if parts[2] == "*" else [parts[2]]
                 self.tg.send(chat_id, self.new_ads_text(keys))
+                return
+            if act == "active":
+                text, buttons = self.active_accounts_text()
+                self.tg.send(chat_id, text, buttons)
                 return
             if act == "note":
                 key = parts[2]
