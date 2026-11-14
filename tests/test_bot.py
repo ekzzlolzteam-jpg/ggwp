@@ -255,6 +255,15 @@ class FakeTG:
     def delete(self, chat_id, message_id):
         self.deleted.append(message_id)
 
+    files = None
+
+    def send_document(self, chat_id, filename, data, caption="", mime="text/html"):
+        if self.files is None:
+            self.files = []
+        self.files.append((filename, data.decode("utf-8"), caption))
+        self.next_id += 1
+        return self.next_id
+
     def call(self, *a, **k):
         return {}
 
@@ -496,7 +505,11 @@ class TestButtonsUI(UIBase):
         self.assertIn((ids[600], d), self.bot.anchors.items())          # дата найденного — в базу дат
         self.assertEqual(self.bot.runs, {}, "закончившийся поиск забыт")
         state = json.loads((Path(self.tmp.name) / "state.json").read_text(encoding="utf-8"))
-        self.assertEqual(set(state), {"offset", "watch", "ui"}, "на диске только мониторинг и ввод")
+        self.assertEqual(set(state), {"offset", "watch", "ui", "searched"},
+                         "на диске только мониторинг, ввод и история поисков (для дублей)")
+        self.assertEqual(state["searched"][0]["found"], [ids[600]])
+        self.assertIn("added", state["watch"][str(ids[600])])
+        self.assertEqual(state["watch"][str(ids[600])]["aktiv_seit"], "09.09.2016")
         # ID, которые не открылись, ждут медленной перепроверки по кнопке
         left = len(self.bot.leftovers[1]["ids"])
         self.assertGreater(left, 0)
@@ -1013,6 +1026,36 @@ class TestMonitorAds(unittest.TestCase):
         self.assertNotIn("Quiet", text)
         self.assertIn("w:card:5", str(self.tg.buttons))
 
+    def test_added_date_in_card_and_list(self):
+        self.bot.add_watch(9, "Neu", note="Вася")
+        self.bot.state["watch"]["9"]["added"] = time.mktime((2026, 11, 13, 14, 5, 0, 0, 0, -1))
+        self.bot.handle_callback("1", "w:card:9", 7)
+        self.assertIn("Добавлен в мониторинг: 13.11.2026 14:05", self.tg.edits[-1])
+        self.bot.handle_callback("1", "w:card:5", 7)           # добавлен до обновления — даты нет
+        self.assertIn("Добавлен в мониторинг: неизвестно", self.tg.edits[-1])
+        self.bot.screen_monitor("1")
+        self.assertIn("с 13.11", self.tg.sent[-1])
+
+    def test_export_all_ads_file(self):
+        self.bot.state["watch"]["6"] = {"name": "Quiet", "note": "", "seen": ["9"], "next": 9e12, "fails": 0}
+        self.check({"1": "Altes"})
+        self.check({"1": "Altes", "2": "Dyson V11"})
+        self.check({"1": "Altes", "3": "Nintendo <Switch>"})
+        self.bot.screen_monitor("1")
+        self.assertIn("📥 Выгрузить все объявления (2)", str(self.tg.buttons))
+        self.bot.handle_callback("1", "w:export", 7)
+        name, html, caption = self.tg.files[-1]
+        self.assertTrue(name.endswith(".html"))
+        self.assertIn("активных: 1", caption)
+        self.assertIn("без новых объявлений: 1", caption)
+        self.assertIn('href="https://www.kleinanzeigen.de/s-anzeige/x/2"', html)
+        self.assertIn("Nintendo &lt;Switch&gt;", html)            # экранировано
+        self.assertLess(html.index("Nintendo"), html.index("Dyson"), "новые сверху")
+        self.assertNotIn(">Altes<", html)
+        quiet = html[html.index('id="quiet"'):]
+        self.assertIn("Quiet", quiet)
+        self.assertIn("📝 Петя", html)
+
     def test_old_state_without_titles_does_not_spam(self):
         w = self.bot.state["watch"]["5"]
         w["seen"] = ["1001"]                                   # формат прошлой версии: только ID
@@ -1027,19 +1070,47 @@ class TestDuplicates(UIBase):
         self.start_search("Willi 01.10.2016")                  # #1 в работе
         self.start_search("Anna 02.10.2016")                   # #2 в корзине
         self.text("willi 01.10.2016 top")                      # дубль #1 (регистр/плашки не важны)
-        self.assertIn("⚠️ Дубль", self.tg.sent[-1])
+        self.assertIn("⚠️ Возможный дубль", self.tg.sent[-1])
         self.assertIn("поиск #1", self.tg.sent[-1])
-        self.assertNotIn("🔍 Искать", str(self.tg.buttons), "кнопки «Искать» у дубля нет")
-        self.start_search("Anna 02.10.2016")                   # дубль того, что в корзине
-        joined = "\n".join(self.tg.sent)
+        self.assertNotIn("🔍 Искать", str(self.tg.buttons), "вместо «Искать» — подтверждение")
+        self.assertIn("🚀 Всё равно искать", str(self.tg.buttons))
+        self.start_search("Anna 02.10.2016")                   # дубль того, что в корзине («Искать» не сработает)
+        joined = "\n".join(self.tg.sent + self.tg.edits)
         self.assertIn("уже ждёт в корзине — поиск #2", joined)
-        self.assertEqual(sorted(self.bot.runs), [1, 2], "дубли не добавились")
+        self.assertEqual(sorted(self.bot.runs), [1, 2], "дубли без подтверждения не добавились")
         self.start_search("Willi 03.10.2016")                  # то же имя, другая дата — не дубль
         self.assertEqual(sorted(self.bot.runs), [1, 2, 3])
         self.site.gate.set()
         self.wait_all()
-        self.start_search("Willi 01.10.2016")                  # после окончания — можно снова
+        self.start_search("Willi 01.10.2016")                  # уже искали раньше — снова спрашивает
+        self.assertNotIn(4, self.bot.runs)
+        self.assertIn("уже искали", self.tg.edits[-1])        # «Искать» не запустил, а показал, где был
+        self.press("Всё равно искать")                         # подтвердил — запускается
         self.assertIn(4, self.bot.runs)
+
+    def test_ocr_typo_and_cancel(self):
+        self.site.gate = threading.Event()
+        self.start_search("Jürgen Müller 05.10.2016")
+        self.text("Juergen Mueler 05.10.2016")                  # умлауты + опечатка распознавания
+        self.assertIn("⚠️ Возможный дубль", self.tg.sent[-1])
+        self.press("Отмена")
+        self.assertEqual(sorted(self.bot.runs), [1])
+        self.assertIn("Отменено", self.tg.edits[-1])
+
+    def test_duplicate_of_monitored_account(self):
+        self.bot.state["watch"]["777"] = {"name": "Klaus Becker", "note": "Петя", "seen": [], "next": 9e12,
+                                          "fails": 0, "added": time.mktime((2026, 11, 13, 10, 0, 0, 0, 0, -1)),
+                                          "aktiv_seit": "07.03.2015"}
+        self.text("Klaus Becker 07.03.2015")
+        card = self.tg.sent[-1]
+        self.assertIn("уже в мониторинге с 13.11.2026", card)
+        self.assertIn("userId=777", card)
+        self.assertIn("📝 Петя", card)
+        self.text("Klaus Becker 08.03.2015")                   # другая дата регистрации — другой человек
+        self.assertNotIn("дубль", self.tg.sent[-1])
+        del self.bot.state["watch"]["777"]["aktiv_seit"]       # старая запись без даты — спросит по нику
+        self.text("Klaus Becker 08.03.2015")
+        self.assertIn("дата регистрации у него не записана", self.tg.sent[-1])
 
 
 class TestMonitorScreen(unittest.TestCase):

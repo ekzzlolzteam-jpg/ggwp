@@ -1378,6 +1378,29 @@ class TelegramAPI:
                 msg_id = res.get("message_id")
         return msg_id
 
+    def send_document(self, chat_id: str, filename: str, data: bytes, caption: str = "",
+                      mime: str = "text/html") -> Optional[int]:
+        """Отправляет файл (выгрузку). Возвращает message_id или None, если не получилось."""
+        for attempt in range(3):
+            try:
+                r = self.http.post(self.base + "sendDocument", timeout=60,
+                                   data={"chat_id": chat_id, "caption": caption[:1000]},
+                                   files={"document": (filename, data, mime)})
+                res = r.json()
+                if res.get("ok"):
+                    return res["result"].get("message_id")
+                retry = (res.get("parameters") or {}).get("retry_after")
+                if retry:
+                    time.sleep(retry + 1)
+                    continue
+                log.warning("Telegram sendDocument: %s", res.get("description"))
+                return None
+            except (requests.RequestException, ValueError) as exc:
+                log.warning("Telegram sendDocument: %s (попытка %d)",
+                            str(exc).replace(self.token, "<TOKEN>"), attempt + 1)
+                time.sleep(2 * (attempt + 1))
+        return None
+
     def edit(self, chat_id: str, message_id: int, text: str, buttons: Optional[list] = None) -> None:
         self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text[:4000],
                   disable_web_page_preview=True, reply_markup={"inline_keyboard": self._fit(buttons) or []})
@@ -1433,6 +1456,9 @@ BADGE_PICKER = {   # код категории -> (категория, [(клю�
 CATEGORY_TITLE = {"satisfaction": "😊 Оценка", "friendliness": "🙂 Дружелюбие", "reliability": "👍 Надёжность"}
 RPS_CHOICES = (4, 8, 12, 15, 20)
 INTERVAL_CHOICES = ((5, 15), (10, 30), (30, 60), (60, 120))
+SEARCH_RESULT_RU = {"done": "ничего не найдено", "stopped": "остановлен, не найден",
+                    "failed": "закончился ошибкой", "interrupted": "прерван (бот перезапускался)",
+                    "running": "ещё идёт"}
 JOB_STATUS_RU = {"locating": "ищу диапазон", "scanning": "перебор", "done": "завершён",
                  "stopped": "остановлен", "failed": "ошибка", "queued": "в очереди"}
 
@@ -1484,6 +1510,7 @@ class SearchRun:
         self.thread: Optional[threading.Thread] = None
         self.phase = "ждёт очереди"
         self.confirmed: Optional[int] = None    # ID, который пользователь подтвердил кнопкой «✅ Это он»
+        self.hist: Optional[dict] = None        # запись в state["searched"] (история поисков для дублей)
 
 
 class Bot:
@@ -1500,6 +1527,7 @@ class Bot:
         self.state = self._load_state()
         self.runs: dict[int, SearchRun] = {}    # идущие и ждущие поиски (только в памяти)
         self.notes_by_uid: dict[int, str] = {}  # заметка найденного аккаунта — для кнопки «👁 Следить»
+        self.targets_by_uid: dict[int, Target] = {}   # что искали, когда нашли этот ID (дата для мониторинга)
         self.leftovers: dict[int, dict] = {}    # № поиска -> ID, которые не открылись (до перепроверки)
         self.recheck: Optional[dict] = None     # идущая медленная перепроверка
         self.next_num = 1
@@ -1517,10 +1545,13 @@ class Bot:
                 st = json.loads(self.state_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 log.error("state.json повреждён (%s), начинаю с чистого", exc)
-        for key, default in (("offset", None), ("watch", {}), ("ui", {})):
+        for key, default in (("offset", None), ("watch", {}), ("ui", {}), ("searched", [])):
             st.setdefault(key, default)
         for old in ("pending", "job", "queue", "history"):   # данные прошлых версий не храним
             st.pop(old, None)
+        for rec in st["searched"]:                 # поиск, шедший при выключении бота, не доделан
+            if rec.get("status") == "running":
+                rec["status"] = "interrupted"
         return st
 
     def save(self) -> None:
@@ -1575,26 +1606,60 @@ class Bot:
     def parallel_limit(self) -> int:
         return max(1, int(self.cfg["parallel_searches"]))
 
-    def find_duplicate(self, name: Optional[str], aktiv_seit: Optional[date]) -> Optional[SearchRun]:
-        """Тот же аккаунт (имя + дата регистрации) уже ищется или ждёт в корзине?"""
+    @staticmethod
+    def _same_name(a: Optional[str], b: Optional[str]) -> bool:
+        """Тот же ник: регистр, умлауты и мелкие ошибки распознавания со скриншота не важны."""
+        return bool(a and b) and (names_equal(a, b) or name_similarity(a, b) >= 0.9)
+
+    def find_duplicates(self, name: Optional[str], aktiv_seit: Optional[date]) -> list[str]:
+        """Возможные дубли: тот же ник + та же дата регистрации уже ищется, уже искался раньше
+        или этот аккаунт уже в мониторинге. Возвращает строки для предупреждения (пусто — дублей нет)."""
         if not name or not aktiv_seit:
-            return None
-        for run in self.runs.values():
-            if run.target.aktiv_seit == aktiv_seit and names_equal(run.target.name, name):
-                return run
-        return None
+            return []
+        out: list[str] = []
+        live = set()
+        for run in sorted(self.runs.values(), key=lambda r: r.num):
+            if run.hist is not None:
+                live.add(id(run.hist))
+            if run.target.aktiv_seit == aktiv_seit and self._same_name(run.target.name, name):
+                where = "уже ищется" if run.thread is not None else "уже ждёт в корзине"
+                out.append(f"🔄 {run.target.name} / {fmt_date(run.target.aktiv_seit)} {where} — поиск #{run.num}"
+                           + (f" — 📝 {run.target.note}" if run.target.note else ""))
+        for rec in reversed(self.state.get("searched") or []):
+            if id(rec) in live or parse_date(rec.get("aktiv_seit") or "") != aktiv_seit \
+                    or not self._same_name(rec.get("name"), name):
+                continue
+            when = time.strftime("%d.%m.%Y %H:%M", time.localtime(rec.get("at", 0)))
+            found = rec.get("found") or []
+            result = ("найден: " + ", ".join(PROFILE_URL.format(uid=u) for u in found[:3])) if found else \
+                SEARCH_RESULT_RU.get(rec.get("status", ""), "ничего не найдено")
+            out.append(f"🕘 {rec.get('name')} / {rec.get('aktiv_seit')} уже искали {when} — {result}"
+                       + (f" — 📝 {rec['note']}" if rec.get("note") else ""))
+        for key, w in list(self.state["watch"].items()):
+            if not self._same_name(w.get("name"), name):
+                continue
+            d = parse_date(w.get("aktiv_seit") or "")
+            if d is not None and d != aktiv_seit:
+                continue
+            since = self.watch_added_str(w)
+            out.append(f"👁 уже в мониторинге{(' с ' + since) if since else ''}: {self.watch_label(key, w)}"
+                       + ("" if d else " (дата регистрации у него не записана — сверь по ссылке)")
+                       + f"\n   {PROFILE_URL.format(uid=key)}")
+        return out
 
-    def duplicate_warning(self, run: SearchRun) -> str:
-        where = "уже ищется" if run.thread is not None else "уже ждёт в корзине"
-        return f"⚠️ Дубль! {run.target.name} / {fmt_date(run.target.aktiv_seit)} {where} — поиск #{run.num}." \
-               f"{note_suffix(run.target.note)}\nВторой такой же поиск не запускаю."
+    @staticmethod
+    def duplicate_warning(name: str, aktiv_seit: Optional[date], dups: list[str]) -> str:
+        return (f"⚠️ Возможный дубль! Ник «{name}» с датой {fmt_date(aktiv_seit)} уже встречался:\n"
+                + "\n".join("• " + d for d in dups)
+                + "\n\nЗапустить поиск всё равно? «🚀 Всё равно искать» — да, «❌ Отмена» — нет.")
 
-    def submit_search(self, target: Target) -> str:
-        """Запускает поиск, если есть свободный слот (parallel_searches), иначе кладёт в корзину."""
+    def submit_search(self, target: Target, force: bool = False) -> str:
+        """Запускает поиск, если есть свободный слот (parallel_searches), иначе кладёт в корзину.
+        force=True — пользователь видел предупреждение о дубле и всё равно попросил искать."""
         with self.lock:
-            dup = self.find_duplicate(target.name, target.aktiv_seit)
-            if dup is not None:
-                return self.duplicate_warning(dup)
+            dups = [] if force else self.find_duplicates(target.name, target.aktiv_seit)
+            if dups:
+                return self.duplicate_warning(target.name, target.aktiv_seit, dups)
             if len(self.active_runs()) >= self.parallel_limit and \
                     len(self.queued_runs()) >= int(self.cfg["max_queue"]):
                 return f"🧺 Корзина полна ({self.cfg['max_queue']}/{self.cfg['max_queue']}). Дождись, пока " \
@@ -1602,6 +1667,13 @@ class Bot:
             run = SearchRun(self.next_num, target)
             self.next_num += 1
             self.runs[run.num] = run
+            run.hist = {"num": run.num, "name": target.name, "aktiv_seit": fmt_date(target.aktiv_seit),
+                        "badges": dict(target.badges), "note": target.note, "at": time.time(),
+                        "status": "running", "found": []}
+            searched = self.state.setdefault("searched", [])
+            searched.append(run.hist)
+            del searched[:-500]                       # помним последние 500 поисков
+            self.save()
             if len(self.active_runs()) < self.parallel_limit:
                 self._start(run)
                 n = len(self.active_runs())
@@ -1642,6 +1714,7 @@ class Bot:
                f"— если это он, останови кнопкой ниже." if job.total else ""
         if run.target.note:
             self.notes_by_uid[m.user_id] = run.target.note
+        self.targets_by_uid[m.user_id] = run.target
         self.broadcast(f"{head} (поиск #{run.num}){note_suffix(run.target.note)}\n"
                        f"{m.name} (ID {m.user_id})\n{m.url}{notes}{prog}",
                        [[btn(f"✅ Это он — остановить поиск #{run.num}", f"j:ok:{run.num}:{m.user_id}")],
@@ -1678,7 +1751,12 @@ class Bot:
             if keep:
                 self.anchors.add(keep, target.aktiv_seit)
             with self.lock:
-                self.runs.pop(run.num, None)     # поиск закончен — забываем
+                self.runs.pop(run.num, None)     # поиск закончен — забываем (но запись в истории остаётся)
+                if run.hist is not None:
+                    run.hist["status"] = job.status
+                    run.hist["found"] = [run.confirmed] if run.confirmed else \
+                        [m["user_id"] for m in job.matches if m["level"] in ("exact", "partial")][:5]
+                    self.save()
                 if job.error_ids:
                     self.leftovers[run.num] = {"target": target, "ids": list(job.error_ids)}
         buttons = self._watch_buttons(job.matches) or []
@@ -1689,9 +1767,9 @@ class Bot:
             exact = [m for m in job.matches if m["level"] == "exact"]
             if run.confirmed:
                 name = next((m["name"] for m in job.matches if m["user_id"] == run.confirmed), "")
-                self.add_watch(run.confirmed, name, note=run.target.note)
+                self.add_watch(run.confirmed, name, note=run.target.note, target=run.target)
             elif job.status == "done" and len(exact) == 1:
-                self.add_watch(exact[0]["user_id"], exact[0]["name"], note=run.target.note)
+                self.add_watch(exact[0]["user_id"], exact[0]["name"], note=run.target.note, target=run.target)
         self._start_queued()
 
     def report(self, run: SearchRun) -> str:
@@ -1753,7 +1831,7 @@ class Bot:
         run = self.runs.get(num)
         if run is None:
             if action == "ok" and uid:               # поиск уже закончен — просто ставим в мониторинг
-                if not self.add_watch(uid, note=self.notes_by_uid.get(uid, "")):
+                if not self.add_watch(uid, note=self.notes_by_uid.get(uid, ""), target=self.targets_by_uid.get(uid)):
                     return "Этот аккаунт уже в мониторинге."
                 return ""
             return f"Поиск #{num} уже закончен."
@@ -1765,6 +1843,9 @@ class Bot:
             if run.thread is None:              # ещё не начинался — просто убираем
                 with self.lock:
                     self.runs.pop(num, None)
+                    if run.hist is not None and run.hist in self.state.get("searched", []):
+                        self.state["searched"].remove(run.hist)   # не искали — не дубль
+                        self.save()
                 return f"🗑 Поиск #{num} убран из ожидания."
             return f"⏹ Останавливаю поиск #{num}…" if action == "stop" else \
                 f"✅ Принято: ID {uid}. Останавливаю поиск #{num}…"
@@ -2001,11 +2082,11 @@ class Bot:
                  [btn("📝 Заметка", "c:note"), btn("❌ Отмена", "c:cancel")]]
         hint = "\n\nВсё верно? Жми «🔍 Искать» или исправь кнопками." if ready else \
             "\n\nНе хватает имени или даты — задай кнопками ниже."
-        dup = self.find_duplicate(d.get("name"), parse_date(d.get("aktiv_seit") or "")) if ready else None
-        if dup is not None:
-            hint = "\n\n" + self.duplicate_warning(dup).replace("Второй такой же поиск не запускаю.",
-                                                               "Это дубль скриншота — искать второй раз не нужно.")
-            rows = rows[1:]                        # без кнопки «Искать»
+        d_date = parse_date(d.get("aktiv_seit") or "")
+        dups = self.find_duplicates(d.get("name"), d_date) if ready else []
+        if dups:
+            hint = "\n\n" + self.duplicate_warning(d["name"], d_date, dups)
+            rows[0] = [btn("🚀 Всё равно искать", "c:force")]   # вместо «Искать» — явное подтверждение
         self.show(chat_id, f"{title}:\n\n{self.draft_text(d)}{hint}", rows, msg_id)
 
     def ask_note(self, chat_id: str, msg_id: Optional[int] = None) -> None:
@@ -2069,7 +2150,7 @@ class Bot:
         else:
             self.badge_picker(chat_id, msg_id)
 
-    def confirm(self, chat_id: str, msg_id: Optional[int] = None) -> None:
+    def confirm(self, chat_id: str, msg_id: Optional[int] = None, force: bool = False) -> None:
         u = self.ui(chat_id)
         d = u["draft"]
         date_ = parse_date(d.get("aktiv_seit") or "")
@@ -2078,17 +2159,13 @@ class Bot:
             return
         target = Target(d["name"], date_, dict(d.get("badges") or {}), d.get("followers"), d.get("online_ads"),
                         note=(d.get("note") or "").strip())
-        dup = self.find_duplicate(target.name, target.aktiv_seit)
-        if dup is not None:
-            self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
-            if msg_id:
-                self.tg.edit(chat_id, msg_id, f"🚫 Не запущено:\n\n{self.draft_text(target.to_dict())}")
-            self.tg.send(chat_id, self.duplicate_warning(dup), [[btn("📋 Задачи", "t:refresh")]])
+        if not force and self.find_duplicates(target.name, target.aktiv_seit):
+            self.screen_card(chat_id, msg_id)    # покажет, где уже встречался, и спросит «искать всё равно?»
             return
         self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
         if msg_id:
             self.tg.edit(chat_id, msg_id, f"✅ Принято:\n\n{self.draft_text(target.to_dict())}")
-        self.tg.send(chat_id, self.submit_search(target), [[btn("📋 Задачи", "t:refresh")]])
+        self.tg.send(chat_id, self.submit_search(target, force=True), [[btn("📋 Задачи", "t:refresh")]])
 
     def set_draft_from_target(self, chat_id: str, target: Target, title: str) -> None:
         u = self.ui(chat_id)
@@ -2098,14 +2175,17 @@ class Bot:
     # ------------------------------------------------------------------
     # мониторинг
     # ------------------------------------------------------------------
-    def add_watch(self, uid: int, name: str = "", note: str = "") -> bool:
+    def add_watch(self, uid: int, name: str = "", note: str = "", target: Optional[Target] = None) -> bool:
         with self.lock:
             key = str(uid)
             if key in self.state["watch"]:
                 if note and not self.state["watch"][key].get("note"):
                     self.set_watch_note(key, note)
                 return False
-            self.state["watch"][key] = {"name": name, "note": note, "seen": None, "next": 0, "fails": 0}
+            self.state["watch"][key] = {"name": name, "note": note, "seen": None, "next": 0, "fails": 0,
+                                        "added": time.time()}
+            if target is not None:      # что искали — чтобы потом ловить дубли по дате регистрации
+                self.state["watch"][key]["aktiv_seit"] = fmt_date(target.aktiv_seit)
             self.save()
         self.monitor_wakeup.set()
         self.broadcast(f"👁 Слежу за {name or uid}{note_suffix(note)}\n{PROFILE_URL.format(uid=uid)}\n"
@@ -2118,6 +2198,15 @@ class Bot:
             if key in self.state["watch"]:
                 self.state["watch"][key]["note"] = note
                 self.save()
+
+    @staticmethod
+    def watch_added_str(w: dict, fmt: str = "%d.%m.%Y") -> str:
+        """Когда аккаунт добавлен в мониторинг. У добавленных до этой версии точной даты нет —
+        тогда «не позже …» по самой ранней отметке времени, что есть."""
+        if w.get("added"):
+            return time.strftime(fmt, time.localtime(w["added"]))
+        stamps = [a.get("at", 0) for a in w.get("new_ads") or [] if a.get("at")] + ([w["last"]] if w.get("last") else [])
+        return ("не позже " + time.strftime(fmt, time.localtime(min(stamps)))) if stamps else ""
 
     @staticmethod
     def watch_label(key: str, w: dict) -> str:
@@ -2244,6 +2333,97 @@ class Bot:
         lines.append("\nНажми на аккаунт — откроется его карточка (там «📜 Новые» — все его объявления).")
         return "\n".join(lines), chunked(buttons, 3)
 
+    def export_ads_html(self) -> tuple[str, str]:
+        """Выгрузка мониторинга одним файлом: все объявления, замеченные за время слежки (новые сверху,
+        ссылки кликабельные), и кто из аккаунтов активен, а кто нет. Возвращает (html, короткая сводка)."""
+        esc = html_lib.escape
+        now = time.time()
+        watch = dict(self.state["watch"])
+        rows, active, quiet = [], [], []
+        for key, w in watch.items():
+            ads = w.get("new_ads") or []
+            for ad in ads:
+                rows.append((ad.get("at", 0), key, w, ad))
+            (active if ads else quiet).append((key, w))
+        rows.sort(key=lambda r: r[0], reverse=True)
+        active.sort(key=lambda kw: max(a.get("at", 0) for a in kw[1]["new_ads"]), reverse=True)
+
+        def acc(key: str, w: dict) -> str:
+            name = esc(w.get("name") or f"ID {key}")
+            note = f'<div class="note">📝 {esc(w["note"])}</div>' if w.get("note") else ""
+            return f'<a href="{esc(PROFILE_URL.format(uid=key))}">{name}</a>{note}'
+
+        def tm(ts: float, fmt: str = "%d.%m %H:%M") -> str:
+            return time.strftime(fmt, time.localtime(ts)) if ts else "—"
+
+        ad_rows = []
+        for i, (at, key, w, ad) in enumerate(rows, 1):
+            url = ad.get("url") or ""
+            title = esc(ad.get("title") or "без названия")
+            link = f'<a href="{esc(url)}">{title}</a>' if url else title
+            kind = f'✏️ замена<div class="note">было: {esc(ad["was"])}</div>' if ad.get("was") else "🆕 новое"
+            ad_rows.append(f"<tr><td>{i}</td><td>{tm(at)}</td><td>{acc(key, w)}</td><td>{link}</td>"
+                           f"<td>{esc(ad.get('price') or '')}</td><td>{kind}</td></tr>")
+        act_rows = []
+        for key, w in active:
+            ads = w["new_ads"]
+            n_repl = sum(1 for a in ads if a.get("was"))
+            last = max(ads, key=lambda a: a.get("at", 0))
+            act_rows.append(f"<tr><td>{acc(key, w)}</td><td>{esc(self.watch_added_str(w) or '—')}</td>"
+                            f"<td>{len(ads) - n_repl}" + (f" + {n_repl} замен" if n_repl else "") + "</td>"
+                            f"<td>{tm(last.get('at', 0))}</td></tr>")
+        quiet_rows = [f"<tr><td>{acc(key, w)}</td><td>{esc(self.watch_added_str(w) or '—')}</td>"
+                      f"<td>{len(w.get('seen') or [])}</td><td>{tm(w.get('last', 0))}</td></tr>" for key, w in quiet]
+
+        def table(head: str, body: list[str], empty: str) -> str:
+            if not body:
+                return f'<p class="empty">{empty}</p>'
+            return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+
+        summary = (f"Аккаунтов в мониторинге: {len(watch)} · 🔥 активных: {len(active)} · "
+                   f"💤 без новых объявлений: {len(quiet)} · объявлений замечено: {len(rows)}")
+        doc = f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Мониторинг {tm(now, '%d.%m.%Y %H:%M')}</title>
+<style>
+:root {{ color-scheme: light dark; --bg:#fff; --fg:#1b1b1b; --muted:#6b6b6b; --line:#e3e3e3; --head:#f4f4f4; --link:#0a58ca; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#16181c; --fg:#e8e8e8; --muted:#9a9a9a; --line:#2c2f36; --head:#1f2228; --link:#7ab4ff; }} }}
+body {{ margin:0; padding:16px; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui, sans-serif; }}
+h1 {{ font-size:20px; margin:0 0 4px; }} h2 {{ font-size:17px; margin:28px 0 8px; }}
+.sum {{ color:var(--muted); margin-bottom:8px; }} .note {{ color:var(--muted); font-size:13px; }}
+.wrap {{ overflow-x:auto; }} table {{ border-collapse:collapse; width:100%; }}
+th, td {{ border-bottom:1px solid var(--line); padding:8px 6px; text-align:left; vertical-align:top; }}
+th {{ background:var(--head); position:sticky; top:0; }} a {{ color:var(--link); }}
+nav a {{ margin-right:14px; }} .empty {{ color:var(--muted); }}
+</style></head><body>
+<h1>👁 Мониторинг — выгрузка {tm(now, '%d.%m.%Y %H:%M')}</h1>
+<div class="sum">{esc(summary)}</div>
+<nav><a href="#ads">📜 Все объявления</a><a href="#active">🔥 Активные</a><a href="#quiet">💤 Неактивные</a></nav>
+<h2 id="ads">📜 Все объявления, замеченные за время мониторинга ({len(rows)}) — новые сверху</h2>
+<div class="wrap">{table("<th>#</th><th>Когда</th><th>Аккаунт</th><th>Объявление</th><th>Цена</th><th>Тип</th>",
+                        ad_rows, "Пока ни одного нового объявления.")}</div>
+<h2 id="active">🔥 Активные — заливали товар после добавления ({len(active)})</h2>
+<div class="wrap">{table("<th>Аккаунт</th><th>В мониторинге с</th><th>Новых</th><th>Последнее</th>",
+                        act_rows, "Активных пока нет.")}</div>
+<h2 id="quiet">💤 Неактивные — ничего нового с момента добавления ({len(quiet)})</h2>
+<div class="wrap">{table("<th>Аккаунт</th><th>В мониторинге с</th><th>Объявл. на странице</th><th>Посл. проверка</th>",
+                        quiet_rows, "Неактивных нет.")}</div>
+</body></html>"""
+        return doc, summary
+
+    def send_export(self, chat_id: str) -> None:
+        if not self.state["watch"]:
+            self.tg.send(chat_id, "В мониторинге никого нет — выгружать нечего.")
+            return
+        doc, summary = self.export_ads_html()
+        name = time.strftime("monitoring_%Y-%m-%d_%H-%M.html")
+        ok = self.tg.send_document(chat_id, name, doc.encode("utf-8"),
+                                   caption=f"📥 Выгрузка мониторинга\n{summary}\n\nОткрой файл — там все объявления "
+                                           f"списком (новые сверху) с кликабельными ссылками, активные и неактивные.")
+        if not ok:
+            self.tg.send(chat_id, "⚠️ Не получилось отправить файл, присылаю текстом.\n\n"
+                         + self.new_ads_text(list(self.state["watch"])))
+
     def monitor_loop(self) -> None:
         while True:
             try:
@@ -2285,7 +2465,9 @@ class Bot:
         rows = [[btn("➕ Добавить", "w:new")] + ([btn(f"🔄 Проверить всех ({len(keys)})", "w:all")] if w else [])]
         if w:
             n_active = len(self.active_watch_keys())
-            rows.append([btn("📜 Все новые объявления", "w:ads:*"), btn(f"🔥 Активные ({n_active})", "w:active")])
+            n_ads = sum(len(x.get("new_ads") or []) for x in w.values())
+            rows.append([btn(f"📥 Выгрузить все объявления ({n_ads})", "w:export")])
+            rows.append([btn("📜 Новые текстом", "w:ads:*"), btn(f"🔥 Активные ({n_active})", "w:active")])
         start = page * self.MONITOR_PAGE
         acc_buttons = []
         for i, key in enumerate(keys[start:start + self.MONITOR_PAGE], start + 1):
@@ -2293,7 +2475,9 @@ class Bot:
             last = time.strftime("%H:%M", time.localtime(item["last"])) if item.get("last") else "—"
             n_new = len(item.get("new_ads") or [])
             name = item.get("name") or f"ID {key}"
+            since = self.watch_added_str(item, "%d.%m").replace("не позже ", "≤")
             lines.append(f"{i}. {name}" + (f" — 📝 {item['note']}" if item.get("note") else "")
+                         + (f" · с {since}" if since else "")
                          + f" · {len(item.get('seen') or [])} объявл." + (f" · 🆕{n_new}" if n_new else "")
                          + f" · {last}")
             acc_buttons.append(btn(f"{i}. {(item.get('note') or name)[:14]}", f"w:card:{key}"))
@@ -2319,8 +2503,10 @@ class Bot:
             return
         last = time.strftime("%d.%m %H:%M", time.localtime(item["last"])) if item.get("last") else "ещё не было"
         n_new = len(item.get("new_ads") or [])
+        added = self.watch_added_str(item, "%d.%m.%Y %H:%M") or "неизвестно (добавлен до обновления бота)"
         lines = [f"👤 {item.get('name') or 'ID ' + key} (ID {key})",
                  f"📝 Заметка: {item.get('note') or '—'}",
+                 f"📅 Добавлен в мониторинг: {added}",
                  f"Объявлений на странице: {len(item.get('seen') or [])}",
                  f"Новых замечено с начала мониторинга: {n_new}",
                  f"Последняя проверка: {last}",
@@ -2572,6 +2758,8 @@ class Bot:
                 self.start_wizard(chat_id)
             elif act == "go":
                 self.confirm(chat_id, msg_id)
+            elif act == "force":
+                self.confirm(chat_id, msg_id, force=True)
             elif act == "cancel":
                 self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
                 self.tg.edit(chat_id, msg_id, "❌ Отменено.")
@@ -2654,7 +2842,7 @@ class Bot:
             act = parts[1]
             if act == "add":
                 uid = int(parts[2])
-                if not self.add_watch(uid, note=self.notes_by_uid.get(uid, "")):
+                if not self.add_watch(uid, note=self.notes_by_uid.get(uid, ""), target=self.targets_by_uid.get(uid)):
                     self.tg.send(chat_id, "Этот профиль уже в мониторинге.")
                 return
             if act == "new":
@@ -2669,6 +2857,9 @@ class Bot:
             if act == "ads":
                 keys = list(self.state["watch"]) if parts[2] == "*" else [parts[2]]
                 self.tg.send(chat_id, self.new_ads_text(keys))
+                return
+            if act == "export":
+                self.send_export(chat_id)
                 return
             if act == "active":
                 text, buttons = self.active_accounts_text()
