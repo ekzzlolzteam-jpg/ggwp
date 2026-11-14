@@ -4,6 +4,7 @@
 """
 import json
 import random
+import re
 import sys
 import time
 import tempfile
@@ -233,14 +234,34 @@ class TestScanner(unittest.TestCase):
         self.assertIsNone(kb.match_profile(t, kb.Profile(1, "peter", d, {})))
 
 
+def check_telegram_html(text):
+    """Как Telegram в parse_mode=HTML: только b/i/a/code, теги закрыты, «<» и «&» — экранированы."""
+    stack = []
+    for m in re.finditer(r"<(/?)([a-z]+)([^>]*)>|<|&(?!(?:amp|lt|gt|quot|#\d+);)", text):
+        if m.group(0) in ("<", "&"):
+            raise AssertionError(f"неэкранированный «{m.group(0)}» в: {text[:200]!r}")
+        close, tag = m.group(1), m.group(2)
+        if tag not in ("b", "i", "a", "code"):
+            raise AssertionError(f"тег <{tag}> Telegram не поддерживает: {text[:200]!r}")
+        if close:
+            if not stack or stack.pop() != tag:
+                raise AssertionError(f"незакрытый/лишний </{tag}> в: {text[:200]!r}")
+        else:
+            stack.append(tag)
+    if stack:
+        raise AssertionError(f"не закрыт <{stack[-1]}> в: {text[:200]!r}")
+
+
 class FakeTG:
-    """Запоминает, что бот отправил/отредактировал; кнопки последнего экрана — в self.buttons."""
+    """Запоминает, что бот отправил/отредактировал; кнопки последнего экрана — в self.buttons.
+    Каждое сообщение проверяется на правильную для Telegram HTML-разметку."""
 
     def __init__(self):
         self.sent, self.edits, self.deleted, self.buttons, self.keyboards = [], [], [], [], []
         self.next_id = 100
 
     def send(self, chat_id, text, buttons=None, keyboard=None):
+        check_telegram_html(text)
         self.sent.append(text)
         self.buttons = buttons or []
         if keyboard:
@@ -249,6 +270,7 @@ class FakeTG:
         return self.next_id
 
     def edit(self, chat_id, message_id, text, buttons=None):
+        check_telegram_html(text)
         self.edits.append(text)
         self.buttons = buttons or []
 
@@ -302,7 +324,7 @@ class TestMonitor(unittest.TestCase):
             bot.state["watch"]["5"] = {"name": "", "seen": None, "next": 0, "fails": 0}
             pages += [page(["1", "2"]), kb.FetchResult("error", error="HTTP 403"), page(["1", "3"]), page(["1", "2", "3"])]
             msgs = [bot.check_watch("5") for _ in range(4)]
-            self.assertIn("сейчас 2 объявл.", msgs[0][0])            # первый раз — без спама
+            self.assertIn("2 объявл. — дальше только новые", msgs[0][0])            # первый раз — без спама
             self.assertEqual(msgs[1], [])                              # ошибка не сбрасывает «виденные»
             self.assertEqual(len(msgs[2]), 1)
             self.assertIn("Ad 3", msgs[2][0])
@@ -480,12 +502,12 @@ class TestButtonsUI(UIBase):
         self.text("/start")
         self.assertEqual(self.tg.keyboards[-1]["keyboard"][0][0]["text"], kb.M_SEARCH)
         self.text(kb.M_SEARCH)
-        self.assertIn("Напиши имя", self.tg.sent[-1])
+        self.assertIn("Имя как на профиле", self.tg.sent[-1])
         self.text("Arne  Schwarzmann")
         self.press("2016")
         self.press("Сен")
         self.press("9")                                   # кнопка «9» — 9 сентября
-        self.assertIn("Отметь плашки", self.tg.edits[-1])
+        self.assertIn("Плашки как на профиле", self.tg.edits[-1])
         self.press("TOP")
         self.press("Zuverlässig")
         self.press("Sehr")                                # Sehr freundlich…
@@ -498,9 +520,9 @@ class TestButtonsUI(UIBase):
         self.press("Искать")
         self.wait_all()
         everything = "\n".join(self.tg.sent)
-        self.assertIn("Поиск #1 запущен", everything)
-        self.assertIn("НАЙДЕН ПОЛЬЗОВАТЕЛЬ", everything)
-        self.assertIn("Поиск #1 завершён", everything)                   # дошёл до конца
+        self.assertIn("🚀 #1", everything)
+        self.assertIn("Найден</b>", everything)
+        self.assertIn("#1 завершён", everything)                   # дошёл до конца
         self.assertIn(str(ids[600]), self.bot.state["watch"])           # единственное точное → мониторинг
         self.assertIn((ids[600], d), self.bot.anchors.items())          # дата найденного — в базу дат
         self.assertEqual(self.bot.runs, {}, "закончившийся поиск забыт")
@@ -513,16 +535,16 @@ class TestButtonsUI(UIBase):
         # ID, которые не открылись, ждут медленной перепроверки по кнопке
         left = len(self.bot.leftovers[1]["ids"])
         self.assertGreater(left, 0)
-        report = next(t for t in self.tg.sent if "Поиск #1 завершён" in t)
-        self.assertIn(f"{left} ID не открылись", report)
+        report = next(t for t in self.tg.sent if "#1 завершён" in t)
+        self.assertIn(f"не открылись {left}", report)
         self.text(kb.M_TASKS)
-        self.assertIn("ждут перепроверки", self.tg.sent[-1])
-        self.press("Перепроверить #1")
+        self.assertIn("Не открылись", self.tg.sent[-1])
+        self.press("🔁 #1")
         for _ in range(500):
-            if self.bot.recheck is None and any("Перепроверка поиска #1" in t for t in self.tg.sent):
+            if self.bot.recheck is None and any("<b>Перепроверка #1</b>" in t for t in self.tg.sent):
                 break
             time.sleep(0.01)
-        done = next(t for t in self.tg.sent if "Перепроверка поиска #1" in t)
+        done = next(t for t in self.tg.sent if "<b>Перепроверка #1</b>" in t)
         self.assertIn("Открылись:", done)
         self.assertLessEqual(len(self.bot.leftovers.get(1, {}).get("ids", [])), max(2, left // 10))
 
@@ -532,26 +554,27 @@ class TestButtonsUI(UIBase):
             self.start_search(f"User{i} 0{i + 1}.10.2016")
         self.assertEqual(len(self.bot.active_runs()), 3, "одновременно — только 3")
         self.assertEqual(len(self.bot.queued_runs()), 2, "остальные — в корзине")
-        self.assertIn("Поиск #4 в корзине (1/15)", "\n".join(self.tg.sent))
+        self.assertIn("🧺 #4", "\n".join(self.tg.sent))
+        self.assertIn("в очереди 1/15", "\n".join(self.tg.sent))
         for i in range(5, 18):                            # заполняем корзину до 15
             self.start_search(f"More{i} 1{i % 9}.10.2016")
         self.assertEqual(len(self.bot.queued_runs()), 15)
         self.start_search("Overflow 20.10.2016")
-        self.assertIn("Корзина полна (15/15)", "\n".join(self.tg.sent))
+        self.assertIn("Очередь полна (15/15)", "\n".join(self.tg.sent))
         self.text(kb.M_TASKS)
-        self.assertIn("В работе: 3 из 3", self.tg.sent[-1])
-        self.assertIn("Корзина: 15 из 15", self.tg.sent[-1])
+        self.assertIn("Задачи</b> · 3/3", self.tg.sent[-1])
+        self.assertIn("очередь 15/15", self.tg.sent[-1])
         # убрать из корзины и поменять число параллельных кнопкой
-        self.press("Убрать из корзины #18")
+        self.press("🗑 #18")
         self.assertEqual(len(self.bot.queued_runs()), 14)
         self.text(kb.M_TASKS)
-        self.press("2 парал.")
+        self.press("2×")
         self.assertEqual(self.bot.cfg["parallel_searches"], 2)
-        self.press("3 парал.")
+        self.press("3×")
         self.site.gate.set()
         self.wait_all()
         self.assertEqual(sum("завершён" in t for t in self.tg.sent), 17, "все из корзины отработали сами")
-        self.assertTrue(any("Из корзины в работу" in t for t in self.tg.sent))
+        self.assertTrue(any("из очереди в работу" in t for t in self.tg.sent))
 
     def test_stop_button_and_this_is_him(self):
         d, d2 = date(2016, 10, 1), date(2016, 10, 5)
@@ -580,10 +603,10 @@ class TestButtonsUI(UIBase):
             self.fail(f"не дождались: {what}")
 
         self.start_search("Willi 01.10.2016")
-        wait_for(lambda: any("НАЙДЕН" in t for t in self.tg.sent), "уведомление о совпадении")
-        note = next(t for t in self.tg.sent if "НАЙДЕН" in t)
-        self.assertIn("поиск #1", note)
-        self.assertIn("продолжается", note)
+        wait_for(lambda: any("Найден</b>" in t for t in self.tg.sent), "уведомление о совпадении")
+        note = next(t for t in self.tg.sent if "Найден</b>" in t)
+        self.assertIn("· #1", note)
+        self.assertIn("поиск идёт", note)
         self.start_search("Privat 05.10.2016")
         wait_for(lambda: 2 in self.bot.runs and self.bot.runs[2].job.total, "второй поиск начал перебор")
         self.assertEqual(len(self.bot.active_runs()), 2, "оба поиска идут одновременно")
@@ -593,8 +616,8 @@ class TestButtonsUI(UIBase):
                 "id": "c", "data": data, "message": {"chat": {"id": int(self.CHAT)}, "message_id": 77}}})
         self.wait_all()
         everything = "\n".join(self.tg.sent)
-        self.assertIn(f"Поиск #1 остановлен: ты подтвердил ID {ids[50]}", everything)
-        self.assertIn("Поиск #2 остановлен", everything)
+        self.assertIn(f"#1 готово</b> — ID {ids[50]}", everything)
+        self.assertIn("#2 остановлен", everything)
         self.assertIn(str(ids[50]), self.bot.state["watch"])            # подтверждённый → мониторинг
 
     def test_card_edit_by_buttons(self):
@@ -612,7 +635,7 @@ class TestButtonsUI(UIBase):
         self.text("https://www.kleinanzeigen.de/s-bestandsliste.html?userId=40300011")
         self.assertIn("40300011", self.bot.state["watch"])
         self.text(kb.M_MONITOR)
-        self.press("Интервал")
+        self.press("⏱")
         self.press("30–60")
         self.assertEqual((self.bot.cfg["monitor_minutes_min"], self.bot.cfg["monitor_minutes_max"]), (30, 60))
         self.text(kb.M_MONITOR)
@@ -630,7 +653,7 @@ class TestButtonsUI(UIBase):
         self.assertEqual(self.bot.cfg["proxy_urls"], [p1, p2])
         self.assertTrue(self.tg.deleted, "сообщение с паролем должно удаляться")
         self.assertNotIn("secret", self.tg.sent[-1])
-        self.assertIn(f"всего до {2 * self.bot.cfg['requests_per_second']}/с", self.tg.sent[-1])  # × 2 прокси
+        self.assertIn(f"до {2 * self.bot.cfg['requests_per_second']}/с", self.tg.sent[-1])  # × 2 прокси
         saved = json.loads((Path(self.tmp.name) / "config.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["proxy_urls"], [p1, p2])
         self.assertEqual(saved["telegram_token"], "x")
@@ -764,7 +787,7 @@ class TestSpeed(unittest.TestCase):
             bot._on_match(run, kb.Match("exact", 41000123, "Arne"))
             self.assertIn("41000123;05.03.2016", (Path(tmp) / "known_accounts.txt").read_text(encoding="utf-8"))
             self.assertEqual(cfg_path.read_text(encoding="utf-8"), cfg_text, "config.json не трогаем")
-            self.assertIn("Это он — остановить поиск #1", str(bot.tg.buttons))
+            self.assertIn("j:ok:1:41000123", str(bot.tg.buttons))
             bot.pool.shutdown()
 
     def test_old_config_keys_are_ignored(self):
@@ -787,16 +810,16 @@ class TestNotes(UIBase):
         self.press("📝 Заметка")
         self.text("Петя, Audi A4")
         card = self.tg.sent[-1]
-        self.assertIn("📝 Заметка: Петя, Audi A4", card)
+        self.assertIn("📝 Петя, Audi A4", card)
         self.press("Искать")
         for _ in range(500):
-            if any("НАЙДЕН" in t for t in self.tg.sent):
+            if any("Найден</b>" in t for t in self.tg.sent):
                 break
             time.sleep(0.01)
-        note_msg = next(t for t in self.tg.sent if "НАЙДЕН" in t)
+        note_msg = next(t for t in self.tg.sent if "Найден</b>" in t)
         self.assertIn("📝 Петя, Audi A4", note_msg)
         self.wait_all()
-        report = next(t for t in self.tg.sent if "Поиск #1 завершён" in t)
+        report = next(t for t in self.tg.sent if "#1 завершён" in t)
         self.assertIn("📝 Петя, Audi A4", report)
         key = str(ids[50])
         self.assertEqual(self.bot.state["watch"][key]["note"], "Петя, Audi A4")   # заметка ушла в мониторинг
@@ -814,17 +837,18 @@ class TestNotes(UIBase):
         first = self.bot.check_watch(key)
         new = self.bot.check_watch(key)
         self.assertIn("📝 Петя, Audi A4", first[0])
-        self.assertIn("🆕 Новое объявление у Willi", new[0])
+        self.assertTrue(new[0].startswith("🆕"))
+        self.assertIn("Willi</a>", new[0])
         self.assertIn("📝 Петя, Audi A4", new[0])
 
         # «о каждой проверке» — сообщение даже без новых, тоже с заметкой
         self.text(kb.M_MONITOR)
-        self.assertIn("📝 Петя, Audi A4", self.tg.sent[-1])
-        self.press("О каждой проверке")
+        self.assertIn("Петя, Audi A4", self.tg.sent[-1])
+        self.press("🔔")
         self.assertTrue(self.bot.cfg["monitor_every_check"])
         pages.append(page(["1", "2"]))
         quiet = self.bot.check_watch(key)
-        self.assertIn("новых объявлений нет", quiet[0])
+        self.assertIn("новых нет", quiet[0])
         self.assertIn(f"s-bestandsliste.html?userId={key}", quiet[0])      # ссылка на аккаунт
         self.assertIn("📝 Петя, Audi A4", quiet[0])
 
@@ -834,7 +858,7 @@ class TestNotes(UIBase):
         self.press("📝 Заметка")
         self.text("Вася — перекупщик")
         self.assertEqual(self.bot.state["watch"][key]["note"], "Вася — перекупщик")
-        self.assertIn("Заметка сохранена", self.tg.sent[-1])        # вернулись в карточку
+        self.assertIn("✅ Сохранено", self.tg.sent[-1])        # вернулись в карточку
         self.press("📝 Заметка")
         self.text("-")
         self.assertEqual(self.bot.state["watch"][key]["note"], "")
@@ -902,10 +926,10 @@ class TestNoteDuringSearch(UIBase):
         self.bot.cfg["parallel_searches"] = 1              # второй поиск — в корзину
         self.start_search("Privat 05.10.2016")
         for _ in range(500):
-            if any("НАЙДЕН" in t for t in self.tg.sent):
+            if any("Найден</b>" in t for t in self.tg.sent):
                 break
             time.sleep(0.01)
-        first = next(t for t in self.tg.sent if "НАЙДЕН" in t)
+        first = next(t for t in self.tg.sent if "Найден</b>" in t)
         self.assertNotIn("📝", first)
 
         self.text(kb.M_TASKS)
@@ -922,11 +946,11 @@ class TestNoteDuringSearch(UIBase):
 
         hold.set()
         self.wait_all()
-        second = [t for t in self.tg.sent if "НАЙДЕН" in t and "поиск #1" in t][-1]
+        second = [t for t in self.tg.sent if "Найден</b>" in t and "· #1" in t][-1]
         self.assertIn("📝 Петя, Audi A4", second)           # следующие уведомления — с заметкой
-        report = next(t for t in self.tg.sent if "Поиск #1 завершён" in t)
+        report = next(t for t in self.tg.sent if "#1 завершён" in t)
         self.assertIn("📝 Петя, Audi A4", report)
-        self.assertTrue(any("Поиск #2" in t and "📝 Аня" in t for t in self.tg.sent))
+        self.assertTrue(any("#2" in t and "📝 Аня" in t for t in self.tg.sent))
 
     def test_remove_note_and_finished_search(self):
         self.site.gate = threading.Event()
@@ -980,7 +1004,7 @@ class TestMonitorAds(unittest.TestCase):
         self.check({"1001": "Dyson V11"})
         msg = self.check({"1001": "Nintendo Switch"})          # отредактировал: тот же ID, другое название
         self.assertEqual(len(msg), 1)
-        self.assertIn("✏️ Объявление заменено", msg[0])
+        self.assertIn("✏️ <b>", msg[0])
         self.assertIn("было: Dyson V11", msg[0])
         self.assertEqual(self.check({"1001": "Nintendo  switch"}), [], "регистр/пробелы — не замена")
 
@@ -995,12 +1019,11 @@ class TestMonitorAds(unittest.TestCase):
         self.assertIn("📜 Новые (2)", str(self.tg.buttons))
         self.bot.handle_callback("1", "w:ads:5", 7)
         text = self.tg.sent[-1]
-        self.assertIn("новых объявлений: 2", text)
+        self.assertIn("новых 2", text)
         self.assertIn("📝 Петя", text)
-        self.assertIn("1. ", text)
         self.assertIn("Dyson V11", text)
-        self.assertIn("2. ", text)
         self.assertIn("Nintendo Switch", text)
+        self.assertLess(text.index("Nintendo"), text.index("Dyson"), "новые сверху")
         self.assertNotIn("Altes", text)
         self.bot.handle_callback("1", "w:ads:*", 7)            # список по всем аккаунтам
         self.assertIn("Nintendo Switch", self.tg.sent[-1])
@@ -1008,21 +1031,20 @@ class TestMonitorAds(unittest.TestCase):
     def test_active_accounts_button(self):
         self.bot.state["watch"]["6"] = {"name": "Quiet", "note": "", "seen": ["9"], "next": 9e12, "fails": 0}
         self.bot.handle_callback("1", "w:active", 7)
-        self.assertIn("Активных пока нет", self.tg.sent[-1])
+        self.assertIn("Активных нет", self.tg.sent[-1])
         self.check({"1": "Altes"})                             # первая проверка — не активность
         self.bot.handle_callback("1", "w:active", 7)
-        self.assertIn("Активных пока нет", self.tg.sent[-1])
+        self.assertIn("Активных нет", self.tg.sent[-1])
         self.check({"1": "Altes", "2": "Dyson V11"})           # залил новое
         self.check({"1": "Altes", "2": "Nintendo Switch"})     # заменил
         self.bot.screen_monitor("1")
         self.assertIn("🔥 Активные (1)", str(self.tg.buttons))
         self.bot.handle_callback("1", "w:active", 7)
         text = self.tg.sent[-1]
-        self.assertIn("1 из 2", text)
+        self.assertIn("1/2", text)
         self.assertIn("Willi", text)
         self.assertIn("📝 Петя", text)
-        self.assertIn("🆕 1 · ✏️ 1", text)
-        self.assertIn("Nintendo Switch", text)
+        self.assertIn("🆕1 ✏️1", text)
         self.assertNotIn("Quiet", text)
         self.assertIn("w:card:5", str(self.tg.buttons))
 
@@ -1030,11 +1052,11 @@ class TestMonitorAds(unittest.TestCase):
         self.bot.add_watch(9, "Neu", note="Вася")
         self.bot.state["watch"]["9"]["added"] = time.mktime((2026, 11, 13, 14, 5, 0, 0, 0, -1))
         self.bot.handle_callback("1", "w:card:9", 7)
-        self.assertIn("Добавлен в мониторинг: 13.11.2026 14:05", self.tg.edits[-1])
+        self.assertIn("в мониторинге с 13.11.2026 14:05", self.tg.edits[-1])
         self.bot.handle_callback("1", "w:card:5", 7)           # добавлен до обновления — даты нет
-        self.assertIn("Добавлен в мониторинг: неизвестно", self.tg.edits[-1])
+        self.assertIn("дата неизвестна", self.tg.edits[-1])
         self.bot.screen_monitor("1")
-        self.assertIn("с 13.11", self.tg.sent[-1])
+        self.assertIn("Вася", self.tg.sent[-1])
 
     def test_export_all_ads_file(self):
         self.bot.state["watch"]["6"] = {"name": "Quiet", "note": "", "seen": ["9"], "next": 9e12, "fails": 0}
@@ -1044,7 +1066,7 @@ class TestMonitorAds(unittest.TestCase):
         views = {"1": 50, "3": 7}
         self.bot.fetcher.get_views = lambda ad_id, stop=None: views.get(ad_id)
         self.bot.screen_monitor("1")
-        self.assertIn("📥 Таблица всех объявлений (3)", str(self.tg.buttons))
+        self.assertIn("📥 Таблица (3)", str(self.tg.buttons))
         self.bot._send_report(["1"], auto=True)                # авто-отчёт: база для Δ
         name, html, caption = self.tg.files[-1]
         self.assertTrue(name.endswith(".html"))
@@ -1095,7 +1117,7 @@ class TestMonitorAds(unittest.TestCase):
     def test_report_hours_button(self):
         self.bot.handle_callback("1", "w:rep", 7)
         self.assertEqual(self.bot.cfg["report_hours"], 8)
-        self.assertIn("Авто-таблица: каждые 8 ч", str(self.tg.buttons))
+        self.assertIn("📊 8 ч", str(self.tg.buttons))
         for _ in range(3):
             self.bot.handle_callback("1", "w:rep", 7)
         self.assertEqual(self.bot.cfg["report_hours"], 0)
@@ -1115,13 +1137,13 @@ class TestDuplicates(UIBase):
         self.start_search("Willi 01.10.2016")                  # #1 в работе
         self.start_search("Anna 02.10.2016")                   # #2 в корзине
         self.text("willi 01.10.2016 top")                      # дубль #1 (регистр/плашки не важны)
-        self.assertIn("⚠️ Возможный дубль", self.tg.sent[-1])
+        self.assertIn("Возможный дубль", self.tg.sent[-1])
         self.assertIn("поиск #1", self.tg.sent[-1])
         self.assertNotIn("🔍 Искать", str(self.tg.buttons), "вместо «Искать» — подтверждение")
-        self.assertIn("🚀 Всё равно искать", str(self.tg.buttons))
+        self.assertIn("Всё равно искать", str(self.tg.buttons))
         self.start_search("Anna 02.10.2016")                   # дубль того, что в корзине («Искать» не сработает)
         joined = "\n".join(self.tg.sent + self.tg.edits)
-        self.assertIn("уже ждёт в корзине — поиск #2", joined)
+        self.assertIn("поиск #2 ждёт в очереди", joined)
         self.assertEqual(sorted(self.bot.runs), [1, 2], "дубли без подтверждения не добавились")
         self.start_search("Willi 03.10.2016")                  # то же имя, другая дата — не дубль
         self.assertEqual(sorted(self.bot.runs), [1, 2, 3])
@@ -1129,7 +1151,7 @@ class TestDuplicates(UIBase):
         self.wait_all()
         self.start_search("Willi 01.10.2016")                  # уже искали раньше — снова спрашивает
         self.assertNotIn(4, self.bot.runs)
-        self.assertIn("уже искали", self.tg.edits[-1])        # «Искать» не запустил, а показал, где был
+        self.assertIn("искали ", self.tg.edits[-1])        # «Искать» не запустил, а показал, где был
         self.press("Всё равно искать")                         # подтвердил — запускается
         self.assertIn(4, self.bot.runs)
 
@@ -1137,7 +1159,7 @@ class TestDuplicates(UIBase):
         self.site.gate = threading.Event()
         self.start_search("Jürgen Müller 05.10.2016")
         self.text("Juergen Mueler 05.10.2016")                  # умлауты + опечатка распознавания
-        self.assertIn("⚠️ Возможный дубль", self.tg.sent[-1])
+        self.assertIn("Возможный дубль", self.tg.sent[-1])
         self.press("Отмена")
         self.assertEqual(sorted(self.bot.runs), [1])
         self.assertIn("Отменено", self.tg.edits[-1])
@@ -1148,14 +1170,14 @@ class TestDuplicates(UIBase):
                                           "aktiv_seit": "07.03.2015"}
         self.text("Klaus Becker 07.03.2015")
         card = self.tg.sent[-1]
-        self.assertIn("уже в мониторинге с 13.11.2026", card)
+        self.assertIn("в мониторинге с 13.11", card)
         self.assertIn("userId=777", card)
         self.assertIn("📝 Петя", card)
         self.text("Klaus Becker 08.03.2015")                   # другая дата регистрации — другой человек
         self.assertNotIn("дубль", self.tg.sent[-1])
         del self.bot.state["watch"]["777"]["aktiv_seit"]       # старая запись без даты — спросит по нику
         self.text("Klaus Becker 08.03.2015")
-        self.assertIn("дата регистрации у него не записана", self.tg.sent[-1])
+        self.assertIn("дата не записана", self.tg.sent[-1])
 
 
 class TestMonitorScreen(unittest.TestCase):
@@ -1167,10 +1189,10 @@ class TestMonitorScreen(unittest.TestCase):
                 bot.state["watch"][str(40000000 + i)] = {"name": f"N{i}", "note": "", "seen": [], "next": 9e12,
                                                          "fails": 0}
             bot.screen_monitor("1")
-            self.assertIn("Проверить всех (40)", tg.buttons[0][-1]["text"], "кнопка — в первом ряду")
+            self.assertIn("Проверить всех", tg.buttons[0][-1]["text"], "кнопка — в первом ряду")
             self.assertLessEqual(sum(len(r) for r in tg.buttons), 100, "лимит Telegram — 100 кнопок")
             self.assertLess(len(tg.sent[-1]), 4000)
-            self.assertIn("Страница 1 из 3", tg.sent[-1], "40 аккаунтов — 3 страницы по 15")
+            self.assertIn("стр. 1/3", tg.sent[-1], "40 аккаунтов — 3 страницы по 15")
             bot.handle_callback("1", "w:pg:2", 7)
             self.assertIn("N39", tg.edits[-1])
             self.assertNotIn("N0 ", tg.edits[-1])
@@ -1193,7 +1215,25 @@ class TestButtonLimit(unittest.TestCase):
             return None if "reply_markup" in params else {"message_id": 1}   # Telegram отклонил кнопки
         api.call = fake_call
         self.assertEqual(api.send("1", "текст", rows), 1, "текст всё равно доставлен")
-        self.assertEqual(calls, [True, False])
+        self.assertEqual(calls, [True, True, False])
+
+    def test_bad_html_falls_back_to_plain_text(self):
+        api = kb.TelegramAPI("123:abc")
+        sent = []
+
+        def fake_call(method, **params):
+            sent.append(params)
+            return None if "parse_mode" in params else {"message_id": 2}   # «can't parse entities»
+        api.call = fake_call
+        self.assertEqual(api.send("1", '<b>Anna & Co</b> <a href="u">профиль</a>'), 2)
+        self.assertEqual(sent[-1]["text"], "Anna & Co профиль")
+
+    def test_long_text_split_by_lines(self):
+        text = "\n".join(f'<a href="https://x/{i}">строка {i}</a>' for i in range(400))
+        parts = kb.TelegramAPI._split(text)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(x) <= 3900 for x in parts))
+        self.assertEqual("\n".join(parts), text, "ничего не потеряно, ссылки целые")
 
     def test_41_accounts_like_user(self):
         names = ["R H", "Stefanie Werner", "MNT", "Dirk Butzheinen", "RALF", "A.O", "Lisa Krone", "privater Nutzer",

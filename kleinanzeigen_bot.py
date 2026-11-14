@@ -556,9 +556,9 @@ class Fetcher:
         now = time.monotonic()
         out = []
         for lane in self.lanes:
-            st = f"⛔ пауза {int(lane.pause_until - now) // 60 + 1} мин" if lane.pause_until > now else "✅"
-            out.append(f"{lane.label}: {st}, запросов {lane.requests:,}, блок. {lane.blocked}, "
-                       f"ошибок {lane.errors}, ответ ~{lane.latency:.1f} с")
+            st = f"⛔ {int(lane.pause_until - now) // 60 + 1} мин" if lane.pause_until > now else "✅"
+            extra = (f" · блок {lane.blocked}" if lane.blocked else "") + (f" · ошиб {lane.errors}" if lane.errors else "")
+            out.append(f"{st} {lane.label} · {lane.requests:,} запр · {lane.latency:.1f} с{extra}")
         return out
 
     def _on_success(self, lane: Lane, latency: float) -> None:
@@ -1023,8 +1023,22 @@ def _norm_title(title: Optional[str]) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", title or "")).strip().casefold()
 
 
+def esc(text) -> str:
+    """Текст для Telegram с HTML-разметкой."""
+    return html_lib.escape(str(text if text is not None else ""), quote=False)
+
+
+def link(text, url: str) -> str:
+    """Кликабельное имя вместо длинной ссылки."""
+    return f'<a href="{html_lib.escape(url)}">{esc(text)}</a>'
+
+
+def plink(uid, text=None) -> str:
+    return link(text or f"ID {uid}", PROFILE_URL.format(uid=uid))
+
+
 def note_suffix(note: Optional[str]) -> str:
-    return f"\n📝 {note}" if note else ""
+    return f" · 📝 {esc(note)}" if note else ""
 
 
 @dataclass
@@ -1405,20 +1419,46 @@ class TelegramAPI:
             total += len(row)
         return out
 
+    @staticmethod
+    def _plain(text: str) -> str:
+        return html_lib.unescape(re.sub(r"<[^>]+>", "", text))
+
+    @staticmethod
+    def _split(text: str, size: int = 3900) -> list[str]:
+        """Режем длинное по строкам, чтобы не разорвать ссылку посередине."""
+        parts, cur = [], None
+        for line in text.split("\n"):
+            while len(line) > size:
+                if cur is not None:
+                    parts.append(cur)
+                    cur = None
+                parts.append(line[:size])
+                line = line[size:]
+            if cur is not None and len(cur) + 1 + len(line) > size:
+                parts.append(cur)
+                cur = None
+            cur = line if cur is None else f"{cur}\n{line}"
+        parts.append(cur or "")
+        return parts
+
     def send(self, chat_id: str, text: str, buttons: Optional[list] = None,
              keyboard: Optional[dict] = None) -> Optional[int]:
-        """Отправляет сообщение (длинное — частями). buttons — inline-кнопки под последней частью,
+        """Отправляет сообщение (HTML; длинное — частями). buttons — inline-кнопки под последней частью,
         keyboard — нижнее меню. Возвращает message_id последней части."""
-        chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)] or [""]
+        chunks = self._split(text) or [""]
         msg_id = None
         for n, chunk in enumerate(chunks):
-            params = {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}
+            params = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML", "disable_web_page_preview": True}
             if n == len(chunks) - 1:
                 if buttons:
                     params["reply_markup"] = {"inline_keyboard": self._fit(buttons)}
                 elif keyboard:
                     params["reply_markup"] = keyboard
             res = self.call("sendMessage", **params)
+            if res is None:                                   # кривая разметка — шлём простым текстом
+                params.pop("parse_mode")
+                params["text"] = self._plain(chunk)
+                res = self.call("sendMessage", **params)
             if res is None and "reply_markup" in params:      # отклонили из-за кнопок — шлём хотя бы текст
                 params.pop("reply_markup")
                 res = self.call("sendMessage", **params)
@@ -1450,8 +1490,12 @@ class TelegramAPI:
         return None
 
     def edit(self, chat_id: str, message_id: int, text: str, buttons: Optional[list] = None) -> None:
-        self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text[:4000],
-                  disable_web_page_preview=True, reply_markup={"inline_keyboard": self._fit(buttons) or []})
+        params = dict(chat_id=chat_id, message_id=message_id, text=text[:4000], parse_mode="HTML",
+                      disable_web_page_preview=True, reply_markup={"inline_keyboard": self._fit(buttons) or []})
+        if self.call("editMessageText", **params) is None:
+            params.pop("parse_mode")
+            params["text"] = self._plain(text)[:4000]
+            self.call("editMessageText", **params)
 
     def delete(self, chat_id: str, message_id: int) -> None:
         self.call("deleteMessage", chat_id=chat_id, message_id=message_id)
@@ -1466,34 +1510,24 @@ class TelegramAPI:
 
 
 # --- главное меню (нижняя клавиатура) ---
-M_SEARCH, M_TASKS, M_STATUS = "🔍 Поиск по имени", "📋 Задачи", "📊 Статус"
-M_RESULTS, M_MONITOR, M_PROXY = "🏆 Результаты", "👁 Мониторинг", "🌐 Прокси"
+M_SEARCH, M_TASKS, M_STATUS = "🔍 Поиск", "📋 Задачи", "📊 Статус"
+M_RESULTS, M_MONITOR, M_PROXY = "🏆 Найдено", "👁 Мониторинг", "🌐 Прокси"
+OLD_MENU = {"🔍 Поиск по имени": M_SEARCH, "🏆 Результаты": M_RESULTS}   # кнопки прошлых версий
 MAIN_KEYBOARD = {
-    "keyboard": [[{"text": M_SEARCH}, {"text": M_TASKS}],
-                 [{"text": M_STATUS}, {"text": M_RESULTS}],
-                 [{"text": M_MONITOR}, {"text": M_PROXY}]],
+    "keyboard": [[{"text": M_SEARCH}, {"text": M_TASKS}, {"text": M_MONITOR}],
+                 [{"text": M_STATUS}, {"text": M_RESULTS}, {"text": M_PROXY}]],
     "resize_keyboard": True,
     "is_persistent": True,
 }
 
-HELP = f"""🔎 Поиск пользователя Kleinanzeigen
+HELP = f"""<b>Поиск продавца Kleinanzeigen</b>
 
-Всё управляется кнопками внизу:
-{M_SEARCH} — ввести имя, выбрать дату и плашки кнопками
-{M_TASKS} — поиски в работе (⏸/⏹ для каждого), 🧺 корзина, перепроверка ошибок
-{M_STATUS} — прогресс и скорость
-{M_RESULTS} — что найдено в идущих поисках
-{M_MONITOR} — слежка за новыми объявлениями, 📝 заметки «чей аккаунт»
-{M_PROXY} — прокси и скорость запросов
+📸 Пришли скриншот профиля — или нажми {M_SEARCH}.
+Текстом: <code>Manuela 08.02.2017 top</code>
 
-📸 В любой момент можно прислать СКРИНШОТ профиля (можно сразу несколько) —
-каждый станет отдельным поиском: 3 идут одновременно, остальные ждут в корзине (до 15)
-и запускаются сами, как только освобождается место.
-Поиск перебирает день до конца и сообщает о КАЖДОМ совпадении.
-Уверен, что нашёлся нужный? Жми «✅ Это он» под сообщением — поиск остановится.
-📝 На карточке перед поиском можно добавить заметку (чей аккаунт) — она будет
-в каждом уведомлении поиска и мониторинга.
-Текстом тоже можно: Manuela 08.02.2017 top, sehr freundlich"""
+{M_TASKS} — поиски и очередь
+{M_MONITOR} — новые объявления
+{M_STATUS} · {M_PROXY} — скорость и сеть"""
 
 MONTHS_RU = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"]
 BADGE_PICKER = {   # код категории -> (категория, [(ключ уровня, подпись кнопки)])
@@ -1501,12 +1535,11 @@ BADGE_PICKER = {   # код категории -> (категория, [(клю�
     "f": ("friendliness", [("", "Freundlich"), ("sehr", "Sehr"), ("besonders", "Besonders")]),
     "r": ("reliability", [("", "Zuverlässig"), ("sehr", "Sehr"), ("besonders", "Besonders")]),
 }
-CATEGORY_TITLE = {"satisfaction": "😊 Оценка", "friendliness": "🙂 Дружелюбие", "reliability": "👍 Надёжность"}
+CATEGORY_TITLE = {"satisfaction": "Оценка", "friendliness": "Дружелюбие", "reliability": "Надёжность"}
 RPS_CHOICES = (4, 8, 12, 15, 20)
 INTERVAL_CHOICES = ((5, 15), (10, 30), (30, 60), (60, 120))
-SEARCH_RESULT_RU = {"done": "ничего не найдено", "stopped": "остановлен, не найден",
-                    "failed": "закончился ошибкой", "interrupted": "прерван (бот перезапускался)",
-                    "running": "ещё идёт"}
+SEARCH_RESULT_RU = {"done": "не найден", "stopped": "остановлен", "failed": "ошибка",
+                    "interrupted": "прерван", "running": "идёт"}
 JOB_STATUS_RU = {"locating": "ищу диапазон", "scanning": "перебор", "done": "завершён",
                  "stopped": "остановлен", "failed": "ошибка", "queued": "в очереди"}
 
@@ -1679,36 +1712,31 @@ class Bot:
             if run.hist is not None:
                 live.add(id(run.hist))
             if run.target.aktiv_seit == aktiv_seit and self._same_name(run.target.name, name):
-                where = "уже ищется" if run.thread is not None else "уже ждёт в корзине"
-                out.append(f"🔄 {run.target.name} / {fmt_date(run.target.aktiv_seit)} {where} — поиск #{run.num}"
-                           + (f" — 📝 {run.target.note}" if run.target.note else ""))
+                where = "уже ищется" if run.thread is not None else "ждёт в очереди"
+                out.append(f"поиск #{run.num} {where}{note_suffix(run.target.note)}")
         for rec in reversed(self.state.get("searched") or []):
             if id(rec) in live or parse_date(rec.get("aktiv_seit") or "") != aktiv_seit \
                     or not self._same_name(rec.get("name"), name):
                 continue
-            when = time.strftime("%d.%m.%Y %H:%M", time.localtime(rec.get("at", 0)))
+            when = time.strftime("%d.%m %H:%M", time.localtime(rec.get("at", 0)))
             found = rec.get("found") or []
-            result = ("найден: " + ", ".join(PROFILE_URL.format(uid=u) for u in found[:3])) if found else \
-                SEARCH_RESULT_RU.get(rec.get("status", ""), "ничего не найдено")
-            out.append(f"🕘 {rec.get('name')} / {rec.get('aktiv_seit')} уже искали {when} — {result}"
-                       + (f" — 📝 {rec['note']}" if rec.get("note") else ""))
+            result = ("найден " + ", ".join(plink(u) for u in found[:3])) if found else \
+                SEARCH_RESULT_RU.get(rec.get("status", ""), "не найден")
+            out.append(f"искали {when} — {result}{note_suffix(rec.get('note'))}")
         for key, w in list(self.state["watch"].items()):
             if not self._same_name(w.get("name"), name):
                 continue
             d = parse_date(w.get("aktiv_seit") or "")
             if d is not None and d != aktiv_seit:
                 continue
-            since = self.watch_added_str(w)
-            out.append(f"👁 уже в мониторинге{(' с ' + since) if since else ''}: {self.watch_label(key, w)}"
-                       + ("" if d else " (дата регистрации у него не записана — сверь по ссылке)")
-                       + f"\n   {PROFILE_URL.format(uid=key)}")
+            since = self.watch_added_str(w, "%d.%m")
+            out.append(f"в мониторинге{(' с ' + since) if since else ''}: {self.watch_label(key, w)}"
+                       + ("" if d else " (дата не записана — сверь)"))
         return out
 
     @staticmethod
     def duplicate_warning(name: str, aktiv_seit: Optional[date], dups: list[str]) -> str:
-        return (f"⚠️ Возможный дубль! Ник «{name}» с датой {fmt_date(aktiv_seit)} уже встречался:\n"
-                + "\n".join("• " + d for d in dups)
-                + "\n\nЗапустить поиск всё равно? «🚀 Всё равно искать» — да, «❌ Отмена» — нет.")
+        return "⚠️ <b>Возможный дубль</b>\n" + "\n".join("• " + d for d in dups)
 
     def submit_search(self, target: Target, force: bool = False) -> str:
         """Запускает поиск, если есть свободный слот (parallel_searches), иначе кладёт в корзину.
@@ -1719,8 +1747,7 @@ class Bot:
                 return self.duplicate_warning(target.name, target.aktiv_seit, dups)
             if len(self.active_runs()) >= self.parallel_limit and \
                     len(self.queued_runs()) >= int(self.cfg["max_queue"]):
-                return f"🧺 Корзина полна ({self.cfg['max_queue']}/{self.cfg['max_queue']}). Дождись, пока " \
-                       f"освободится место, или убери лишнее в «{M_TASKS}»."
+                return f"🧺 Очередь полна ({self.cfg['max_queue']}/{self.cfg['max_queue']}) — освободи место в {M_TASKS}"
             run = SearchRun(self.next_num, target)
             self.next_num += 1
             self.runs[run.num] = run
@@ -1731,14 +1758,12 @@ class Bot:
             searched.append(run.hist)
             del searched[:-500]                       # помним последние 500 поисков
             self.save()
+            what = f"<b>{esc(target.name)}</b> · {fmt_date(target.aktiv_seit)}"
             if len(self.active_runs()) < self.parallel_limit:
                 self._start(run)
                 n = len(self.active_runs())
-                tail = f"\nСейчас идёт поисков: {n} из {self.parallel_limit} — скорость делится." if n > 1 else ""
-                return f"🚀 Поиск #{run.num} запущен: {target.name}, {fmt_date(target.aktiv_seit)}{tail}"
-            return f"🧺 Поиск #{run.num} в корзине ({len(self.queued_runs())}/{self.cfg['max_queue']}): " \
-                   f"{target.name}, {fmt_date(target.aktiv_seit)}.\nВсе {self.parallel_limit} слота заняты — " \
-                   f"начнётся сам, как только один освободится."
+                return f"🚀 #{run.num} {what}" + (f"\nпоисков сейчас {n}/{self.parallel_limit}" if n > 1 else "")
+            return f"🧺 #{run.num} {what}\nв очереди {len(self.queued_runs())}/{self.cfg['max_queue']}, начнётся сам"
 
     def _start(self, run: SearchRun) -> None:
         run.phase = "ищу диапазон ID"
@@ -1755,8 +1780,8 @@ class Bot:
                 self._start(run)
                 started.append(run)
         for run in started:
-            self.broadcast(f"▶️ Из корзины в работу — поиск #{run.num}: {run.target.name}, "
-                           f"{fmt_date(run.target.aktiv_seit)}{note_suffix(run.target.note)}")
+            self.broadcast(f"▶️ #{run.num} <b>{esc(run.target.name)}</b> · {fmt_date(run.target.aktiv_seit)}"
+                           f"{note_suffix(run.target.note)} — из очереди в работу")
 
     def _on_match(self, run: SearchRun, m: Match) -> None:
         if m.level == "conflict":
@@ -1764,18 +1789,16 @@ class Bot:
             return   # покажем в итоговом отчёте
         self.anchors.add(m.user_id, run.target.aktiv_seit)   # дата найденного — в базу дат
         self.anchors.flush()
-        head = "🎯 НАЙДЕН ПОЛЬЗОВАТЕЛЬ!" if m.level == "exact" else "🤔 Возможное совпадение"
-        notes = ("\n" + "\n".join("• " + n for n in m.notes)) if m.notes else ""
+        head = "🎯 <b>Найден</b>" if m.level == "exact" else "🤔 <b>Похож</b>"
+        notes = ("\n" + "\n".join(esc(n) for n in m.notes)) if m.notes else ""
         job = run.job
-        prog = f"\nПоиск #{run.num} продолжается: проверено {job.checked / job.total * 100:.0f}% " \
-               f"— если это он, останови кнопкой ниже." if job.total else ""
+        prog = f"\n<i>поиск идёт, {job.checked / job.total * 100:.0f}%</i>" if job.total else ""
         if run.target.note:
             self.notes_by_uid[m.user_id] = run.target.note
         self.targets_by_uid[m.user_id] = run.target
-        self.broadcast(f"{head} (поиск #{run.num}){note_suffix(run.target.note)}\n"
-                       f"{m.name} (ID {m.user_id})\n{m.url}{notes}{prog}",
-                       [[btn(f"✅ Это он — остановить поиск #{run.num}", f"j:ok:{run.num}:{m.user_id}")],
-                        [btn("👁 Следить за объявлениями", f"w:add:{m.user_id}")]])
+        self.broadcast(f"{head} · #{run.num}{note_suffix(run.target.note)}\n"
+                       f"{link(m.name, m.url)} · ID {m.user_id}{notes}{prog}",
+                       [[btn("✅ Это он", f"j:ok:{run.num}:{m.user_id}"), btn("👁 Следить", f"w:add:{m.user_id}")]])
 
     def _run_job(self, run: SearchRun) -> None:
         job, target = run.job, run.target
@@ -1786,9 +1809,7 @@ class Bot:
             job.first, job.last = locator.locate(target.aktiv_seit)
             share = max(1, len(self.active_runs()))
             eta = job.total / max(1.0, getattr(self.fetcher, "total_rps", self.cfg["requests_per_second"])) * share / 60
-            self.broadcast(f"📍 Поиск #{run.num} ({target.name}): {fmt_date(target.aktiv_seit)} — ID "
-                           f"{job.first:,}–{job.last:,} ({job.total:,} ID, ~{eta:.0f} мин). Перебираю до конца, "
-                           f"о каждом совпадении сообщу сразу.")
+            self.broadcast(f"📍 #{run.num} {esc(target.name)} · {job.total:,} ID · ~{eta:.0f} мин")
             job.status, run.phase = "scanning", "перебор"
             Scanner(self.fetcher, self.cfg, run.stop, run.pause, lambda m: self._on_match(run, m), lambda: None,
                     share=lambda: max(1, len(self.active_runs()))).run(job, self.pool)
@@ -1818,7 +1839,7 @@ class Bot:
                     self.leftovers[run.num] = {"target": target, "ids": list(job.error_ids)}
         buttons = self._watch_buttons(job.matches) or []
         if job.error_ids:
-            buttons = [[btn(f"🔁 Перепроверить {len(job.error_ids)} ID (медленно)", f"j:re:{run.num}")]] + buttons
+            buttons = [[btn(f"🔁 Перепроверить {len(job.error_ids)}", f"j:re:{run.num}")]] + buttons
         self.broadcast(self.report(run), buttons or None)
         if self.cfg["auto_watch_on_match"]:
             exact = [m for m in job.matches if m["level"] == "exact"]
@@ -1833,42 +1854,33 @@ class Bot:
         job, t = run.job, run.target
         mins = (time.time() - job.started) / 60
         if run.confirmed:
-            head = f"✅ Поиск #{run.num} остановлен: ты подтвердил ID {run.confirmed}"
+            head = f"✅ <b>#{run.num} готово</b> — ID {run.confirmed}"
         elif job.status == "done":
-            head = f"✅ Поиск #{run.num} завершён"
+            head = f"✅ <b>#{run.num} завершён</b>"
         elif job.status == "stopped":
-            head = f"⏹ Поиск #{run.num} остановлен"
+            head = f"⏹ <b>#{run.num} остановлен</b>"
         else:
-            head = f"❌ Поиск #{run.num}: ошибка — {job.message}"
-        lines = [f"{head} ({mins:.0f} мин){note_suffix(t.note)}",
-                 f"Цель: {t.name}, {fmt_date(t.aktiv_seit)}, плашки: {badges_str(t.badges)}"]
+            head = f"❌ <b>#{run.num} ошибка</b> — {esc(job.message)}"
+        lines = [f"{head} · {mins:.0f} мин{note_suffix(t.note)}",
+                 f"{esc(t.name)} · {fmt_date(t.aktiv_seit)}" + (f" · {esc(badges_str(t.badges))}" if t.badges else "")]
         if job.first is not None:
-            lines.append(f"Диапазон: {job.first:,}–{job.last:,}; проверено {job.checked:,}/{job.total:,} "
-                         f"(профилей {job.profiles:,}, пустых {job.missing:,}, не открылись {len(job.error_ids)})")
+            lines.append(f"<i>проверено {job.checked:,}/{job.total:,}"
+                         + (f" · не открылись {len(job.error_ids)}" if job.error_ids else "") + "</i>")
         lines += self._matches_lines(job.matches)
-        if job.error_ids:
-            lines.append(f"\n⚠️ {len(job.error_ids)} ID не открылись (ошибки сети/блокировки) — среди них может "
-                         f"быть нужный. Кнопка «🔁 Перепроверить» проверит их медленно и осторожно, "
-                         f"по одному раз в ~{self.cfg['recheck_delay_seconds']} с.")
         return "\n".join(lines)
 
     @staticmethod
     def _matches_lines(matches: list) -> list[str]:
-        lines = []
-        groups = (("exact", "🎯 Точные совпадения"), ("partial", "🤔 Возможные"),
-                  ("conflict", "↔️ То же имя, другие плашки"))
-        for level, title in groups:
-            items = [m for m in matches if m["level"] == level]
-            if items:
-                lines.append(f"\n{title}:")
-                lines += [f"• {m['name']} — {PROFILE_URL.format(uid=m['user_id'])}"
-                          + (f" ({'; '.join(m['notes'])})" if m["notes"] else "") for m in items]
-        if not matches:
-            lines.append("\n❌ Совпадений не найдено.")
-        return lines
+        icons = {"exact": "🎯", "partial": "🤔", "conflict": "↔️"}
+        lines = [f"{icons[m['level']]} {plink(m['user_id'], m['name'])}"
+                 + (f" — {esc('; '.join(m['notes']))}" if m["notes"] else "")
+                 for level in ("exact", "partial", "conflict") for m in matches if m["level"] == level]
+        if lines:
+            lines.insert(0, "")
+        return lines or ["\nСовпадений нет"]
 
     def _watch_buttons(self, matches: list) -> Optional[list]:
-        rows = [[btn(f"👁 Следить: {m['name'][:24]}", f"w:add:{m['user_id']}")]
+        rows = [[btn(f"👁 {m['name'][:28]}", f"w:add:{m['user_id']}")]
                 for m in matches if m["level"] in ("exact", "partial") and str(m["user_id"]) not in self.state["watch"]]
         return rows[:8] or None
 
@@ -1877,21 +1889,21 @@ class Bot:
             return self.start_recheck(num)
         if action == "rmre":
             self.leftovers.pop(num, None)
-            return f"🗑 Ошибки поиска #{num} забыты."
+            return f"🗑 #{num}: ошибки забыты"
         if action == "restop" and self.recheck:
             self.recheck["stop"].set()
-            return "⏹ Останавливаю перепроверку…"
+            return "⏹ Останавливаю перепроверку"
         if action == "par":
             self.save_config(parallel_searches=int(uid or 3))
             self._start_queued()
-            return f"Одновременно будет идти поисков: {self.parallel_limit}."
+            return ""
         run = self.runs.get(num)
         if run is None:
             if action == "ok" and uid:               # поиск уже закончен — просто ставим в мониторинг
                 if not self.add_watch(uid, note=self.notes_by_uid.get(uid, ""), target=self.targets_by_uid.get(uid)):
-                    return "Этот аккаунт уже в мониторинге."
+                    return "Уже в мониторинге"
                 return ""
-            return f"Поиск #{num} уже закончен."
+            return f"#{num} уже закончен"
         if action in ("stop", "ok"):
             if action == "ok" and uid:
                 run.confirmed = uid
@@ -1903,15 +1915,14 @@ class Bot:
                     if run.hist is not None and run.hist in self.state.get("searched", []):
                         self.state["searched"].remove(run.hist)   # не искали — не дубль
                         self.save()
-                return f"🗑 Поиск #{num} убран из ожидания."
-            return f"⏹ Останавливаю поиск #{num}…" if action == "stop" else \
-                f"✅ Принято: ID {uid}. Останавливаю поиск #{num}…"
+                return ""
+            return "" if action == "stop" else f"✅ ID {uid} — останавливаю #{num}"
         if action == "pause":
             run.pause.set()
-            return f"⏸ Поиск #{num} на паузе."
+            return ""
         if action == "resume":
             run.pause.clear()
-            return f"▶️ Поиск #{num} продолжается."
+            return ""
         return ""
 
     def set_run_note(self, num: int, note: str) -> bool:
@@ -1936,16 +1947,15 @@ class Bot:
     def start_recheck(self, num: int) -> str:
         item = self.leftovers.get(num)
         if not item:
-            return f"У поиска #{num} нет ID для перепроверки (или они уже перепроверены)."
+            return f"#{num}: перепроверять нечего"
         if self.recheck is not None:
-            return "Уже идёт перепроверка — дождись её конца (видно в «📋 Задачи»)."
+            return f"Перепроверка уже идёт — {M_TASKS}"
         task = {"num": num, "target": item["target"], "ids": item["ids"], "done": 0, "fixed": 0,
                 "stop": threading.Event()}
         self.recheck = task
         threading.Thread(target=self._recheck_slowly, args=(task,), name=f"recheck-{num}", daemon=True).start()
         mins = len(item["ids"]) * (self.cfg["recheck_delay_seconds"] + 1) / 60
-        return f"🔁 Перепроверяю {len(item['ids'])} ID поиска #{num} медленно (~{max(1, round(mins))} мин). " \
-               f"О совпадениях сообщу, итог пришлю."
+        return f"🔁 #{num}: перепроверяю {len(item['ids'])} ID · ~{max(1, round(mins))} мин"
 
     def _recheck_slowly(self, task: dict) -> None:
         """Перепроверка ID с ошибками: по одному, с паузой, с дополнительными повторами —
@@ -1983,13 +1993,11 @@ class Bot:
                     self.leftovers[num] = {"target": target, "ids": left}
                 else:
                     self.leftovers.pop(num, None)
-        lines = [f"🔁 Перепроверка поиска #{num} ({target.name}, {fmt_date(target.aktiv_seit)})"
-                 f"{note_suffix(target.note)}",
-                 f"Открылись: {task['fixed']} из {len(task['ids'])}" + (f", снова не открылись: {len(left)}" if left
-                                                                       else " — все проверены ✅")]
+        lines = [f"🔁 <b>Перепроверка #{num}</b> · {esc(target.name)}{note_suffix(target.note)}",
+                 f"Открылись: {task['fixed']}/{len(task['ids'])}" + (f" · снова нет: {len(left)}" if left else " ✅")]
         if matches:
             lines += self._matches_lines(matches)
-        buttons = [[btn(f"🔁 Ещё раз ({len(left)} ID)", f"j:re:{num}"), btn("🗑 Забыть", f"j:rmre:{num}")]] \
+        buttons = [[btn(f"🔁 Ещё раз ({len(left)})", f"j:re:{num}"), btn("🗑 Забыть", f"j:rmre:{num}")]] \
             if left else None
         self.broadcast("\n".join(lines), buttons)
 
@@ -2003,130 +2011,118 @@ class Bot:
     def _run_line(self, run: SearchRun) -> str:
         job, t = run.job, run.target
         if run.thread is None:
-            st = "⏳ ждёт очереди"
+            st = "⏳"
         elif run.pause.is_set():
-            st = "⏸ пауза"
+            st = "⏸"
         elif job.total:
-            st = f"{job.checked / job.total * 100:.0f}% ({job.checked:,}/{job.total:,})"
+            st = f"{job.checked / job.total * 100:.0f}%"
         else:
-            st = run.phase
+            st = esc(run.phase)
         found = sum(1 for m in job.matches if m["level"] in ("exact", "partial"))
-        return f"#{run.num} {t.name} / {fmt_date(t.aktiv_seit)} — {st}" + (f", найдено {found}" if found else "") \
-            + (f"\n     📝 {t.note}" if t.note else "")
+        return f"#{run.num} <b>{esc(t.name)}</b> · {fmt_date(t.aktiv_seit)} · {st}" \
+            + (f" · 🎯{found}" if found else "") + note_suffix(t.note)
 
     def status_text(self) -> str:
-        parts = ["📊 Статус"]
         active, queued = self.active_runs(), self.queued_runs()
-        if active or queued:
-            parts.append(f"Поисков идёт: {len(active)} из {self.parallel_limit}, в корзине: {len(queued)} "
-                         f"из {self.cfg['max_queue']}")
-            parts += ["  " + self._run_line(r) for r in active + queued]
-            left = sum(max(0, (r.job.last or 0) - (r.job.cursor or r.job.first or 0) + 1)
-                       for r in active if r.job.total and not r.pause.is_set())
-            real = getattr(self.fetcher, "current_rate", lambda: 0.0)()
-            rps = real or getattr(self.fetcher, "total_rps", self.cfg["requests_per_second"])
-            if left:
-                parts.append(f"Осталось перебрать {left:,} ID ≈ {left / max(0.5, rps) / 60:.0f} мин на всё")
-        else:
-            parts.append("Сейчас поисков нет.")
+        parts = [f"📊 <b>Статус</b> · поиски {len(active)}/{self.parallel_limit}"
+                 + (f" · очередь {len(queued)}" if queued else "")]
+        parts += [self._run_line(r) for r in active + queued]
+        real = getattr(self.fetcher, "current_rate", lambda: 0.0)()
+        rps = real or getattr(self.fetcher, "total_rps", self.cfg["requests_per_second"])
+        left = sum(max(0, (r.job.last or 0) - (r.job.cursor or r.job.first or 0) + 1)
+                   for r in active if r.job.total and not r.pause.is_set())
+        if left:
+            parts.append(f"<i>осталось ~{left / max(0.5, rps) / 60:.0f} мин ({left:,} ID)</i>")
         paused = getattr(self.fetcher, "paused_for", lambda: 0)()
         if paused:
-            parts.append(f"⛔ Автопауза из-за блокировки: ещё {paused // 60 + 1} мин")
-        s = getattr(self.fetcher, "stats", None)
-        if s:
-            parts.append(f"Запросов: {s['requests']:,}; блокировок (403/429, с повтором): {s['blocked']}; "
-                         f"не открылись даже после повторов: {s['errors']}")
+            parts.append(f"⛔ Автопауза из-за блокировки: {paused // 60 + 1} мин")
+        n_proxy = len(proxy_list(self.cfg))
+        limit = self.cfg["requests_per_second"] * max(1, n_proxy)
+        parts.append(f"\n⚡ {real:.1f}/{limit} запр/с · " + (f"{n_proxy} прокси" if n_proxy else "без прокси"))
+        st = getattr(self.fetcher, "stats", None)
+        if st:
+            parts.append(f"📨 {st['requests']:,} запр" + (f" · блок {st['blocked']}" if st["blocked"] else "")
+                         + (f" · ошибок {st['errors']}" if st["errors"] else ""))
             kinds = getattr(self.fetcher, "errors_summary", lambda: "")()
             if kinds:
-                parts.append(f"  причины: {kinds}")
+                parts.append(f"<i>{esc(kinds)}</i>")
         lanes = getattr(self.fetcher, "lanes", None) or []
-        n_proxy = len(proxy_list(self.cfg))
-        total = self.cfg["requests_per_second"] * max(1, n_proxy)
-        workers = getattr(self.fetcher, "worker_count", lambda: 6)()
-        real = getattr(self.fetcher, "current_rate", lambda: 0.0)()
-        parts.append(f"Скорость: сейчас {real:.1f} запр/с, лимит {total} ({self.cfg['requests_per_second']}/с × "
-                     f"{n_proxy or 1} {'прокси' if n_proxy else 'прямое соединение'}), потоков {workers}")
-        if len(lanes) > 1 or (lanes and any(lane.pause_until > time.monotonic() for lane in lanes)):
-            parts += ["  " + x for x in self.fetcher.lanes_info()]
+        if lanes and any(lane.pause_until > time.monotonic() for lane in lanes):
+            parts += [esc(x) for x in self.fetcher.lanes_info()]
         if self.leftovers:
-            parts.append(f"⚠️ Ждут перепроверки: {sum(len(i['ids']) for i in self.leftovers.values())} ID "
-                         f"— «{M_TASKS}»")
-        parts.append(f"Мониторинг: {len(self.state['watch'])} акк. · дат в базе: {len(self.anchors):,}")
+            parts.append(f"⚠️ ждут перепроверки: {sum(len(i['ids']) for i in self.leftovers.values())} ID")
+        parts.append(f"👁 {len(self.state['watch'])} в мониторинге · 🗂 {len(self.anchors):,} дат")
         return "\n".join(parts)
 
     def screen_status(self, chat_id: str, msg_id: Optional[int] = None) -> None:
-        self.show(chat_id, self.status_text(), [[btn("🔄 Обновить", "s:refresh"), btn("📋 Задачи", "t:refresh")]],
-                  msg_id)
+        self.show(chat_id, self.status_text(), [[btn("🔄", "s:refresh"), btn(M_TASKS, "t:refresh")]], msg_id)
 
     def screen_tasks(self, chat_id: str, msg_id: Optional[int] = None) -> None:
         active, queued = self.active_runs(), self.queued_runs()
-        lines = ["📋 Задачи", f"\n▶️ В работе: {len(active)} из {self.parallel_limit}"]
+        lines = [f"📋 <b>Задачи</b> · {len(active)}/{self.parallel_limit}"
+                 + (f" · очередь {len(queued)}/{self.cfg['max_queue']}" if queued else "")]
         rows: list = []
-        if not active:
-            lines.append("  сейчас ничего — пришли скриншот или нажми «Поиск по имени»")
-        else:
-            lines.append("  ⏸ пауза · 📝 заметка (чей аккаунт) · ⏹ стоп")
+        if not active and not queued:
+            lines.append(f"Поисков нет. Пришли скриншот или нажми {M_SEARCH}")
         for run in active:
-            lines.append("  " + self._run_line(run))
+            lines.append(self._run_line(run))
             rows.append([btn(f"▶️ #{run.num}", f"j:resume:{run.num}") if run.pause.is_set()
                          else btn(f"⏸ #{run.num}", f"j:pause:{run.num}"),
                          btn(f"📝 #{run.num}", f"j:note:{run.num}"),
-                         btn(f"⏹ Стоп #{run.num}", f"j:stop:{run.num}")])
-        lines.append(f"\n🧺 Корзина: {len(queued)} из {self.cfg['max_queue']}"
-                     + (" — берутся по очереди, как только освобождается слот" if queued else ""))
+                         btn(f"⏹ #{run.num}", f"j:stop:{run.num}")])
+        if queued:
+            lines.append("\n🧺 <b>Очередь</b>")
         for run in queued:
-            lines.append("  " + self._run_line(run))
-            rows.append([btn(f"📝 #{run.num}", f"j:note:{run.num}"),
-                         btn(f"🗑 Убрать из корзины #{run.num}", f"j:stop:{run.num}")])
+            lines.append(self._run_line(run))
+            rows.append([btn(f"📝 #{run.num}", f"j:note:{run.num}"), btn(f"🗑 #{run.num}", f"j:stop:{run.num}")])
         if self.recheck:
             r = self.recheck
-            lines.append(f"\n🔁 Перепроверка #{r['num']}: {r['done']}/{len(r['ids'])}, открылись {r['fixed']}")
-            rows.append([btn(f"⏹ Стоп перепроверки #{r['num']}", f"j:restop:{r['num']}")])
+            lines.append(f"\n🔁 Перепроверка #{r['num']}: {r['done']}/{len(r['ids'])}")
+            rows.append([btn(f"⏹ Перепроверку #{r['num']}", f"j:restop:{r['num']}")])
         waiting = [(n, it) for n, it in self.leftovers.items() if not self.recheck or self.recheck["num"] != n]
         if waiting:
-            lines.append("\n⚠️ Не открылись (ошибки/блокировки), ждут перепроверки:")
+            lines.append("\n⚠️ <b>Не открылись</b>")
             for n, it in waiting:
-                lines.append(f"  #{n} {it['target'].name} / {fmt_date(it['target'].aktiv_seit)} — {len(it['ids'])} ID")
-                rows.append([btn(f"🔁 Перепроверить #{n} ({len(it['ids'])})", f"j:re:{n}"),
-                             btn("🗑", f"j:rmre:{n}")])
-        rows.append([btn(("✅" if k == self.parallel_limit else "") + f"{k} парал.", f"j:par:0:{k}")
-                     for k in (1, 2, 3, 4, 5)])
-        rows.append([btn("🔄 Обновить", "t:refresh"), btn(M_SEARCH, "c:new")])
+                lines.append(f"#{n} {esc(it['target'].name)} · {len(it['ids'])} ID")
+                rows.append([btn(f"🔁 #{n} ({len(it['ids'])})", f"j:re:{n}"), btn(f"🗑 #{n}", f"j:rmre:{n}")])
+        rows.append([btn(("• " if k == self.parallel_limit else "") + f"{k}×", f"j:par:0:{k}") for k in (1, 2, 3, 4, 5)])
+        rows.append([btn("🔄", "t:refresh"), btn(M_SEARCH, "c:new")])
         self.show(chat_id, "\n".join(lines), rows, msg_id)
 
     def screen_results(self, chat_id: str, msg_id: Optional[int] = None) -> None:
         runs = self.active_runs()
         if not runs:
-            self.show(chat_id, "🏆 Сейчас поисков нет. Результаты закончившихся поисков — в их отчётах в чате.",
+            self.show(chat_id, "🏆 Поисков сейчас нет — итоги приходят отдельными сообщениями",
                       [[btn(M_SEARCH, "c:new")]], msg_id)
             return
-        lines = ["🏆 Найдено в идущих поисках"]
+        lines = ["🏆 <b>Найдено</b>"]
         rows: list = []
+        icons = {"exact": "🎯", "partial": "🤔", "conflict": "↔️"}
         for run in runs:
             lines.append("\n" + self._run_line(run))
             for m in run.job.matches:
-                icon = {"exact": "🎯", "partial": "🤔", "conflict": "↔️"}[m["level"]]
-                lines.append(f"  {icon} {m['name']} — {PROFILE_URL.format(uid=m['user_id'])}")
+                lines.append(f"{icons[m['level']]} {plink(m['user_id'], m['name'])}")
                 if m["level"] in ("exact", "partial"):
-                    rows.append([btn(f"✅ #{run.num}: это {m['name'][:18]} (ID {m['user_id']})",
-                                     f"j:ok:{run.num}:{m['user_id']}")])
+                    rows.append([btn(f"✅ #{run.num} {m['name'][:22]}", f"j:ok:{run.num}:{m['user_id']}")])
             if not run.job.matches:
-                lines.append("  — пока совпадений нет")
-        self.show(chat_id, "\n".join(lines), rows[:10] + [[btn("🔄 Обновить", "r:refresh")]], msg_id)
+                lines.append("<i>пока нет</i>")
+        self.show(chat_id, "\n".join(lines), rows[:10] + [[btn("🔄", "r:refresh")]], msg_id)
 
     # ------------------------------------------------------------------
     # мастер поиска: имя → дата → плашки → карточка
     # ------------------------------------------------------------------
     @staticmethod
     def draft_text(d: dict) -> str:
-        lines = [f"👤 Имя: {d.get('name') or '❓ не задано'}",
-                 f"📅 Дата регистрации: {d.get('aktiv_seit') or '❓ не задана'}",
-                 f"🏷 Плашки: {badges_str(d.get('badges') or {})}"]
-        if d.get("followers") is not None:
-            lines.append(f"Подписчики: {d['followers']}")
-        if d.get("online_ads") is not None:
-            lines.append(f"Объявления онлайн: {d['online_ads']}")
-        lines.append(f"📝 Заметка: {d.get('note') or '— (нажми «📝 Заметка», чтобы подписать, чей аккаунт)'}")
+        lines = [f"👤 {esc(d.get('name')) or '<i>имя?</i>'}",
+                 f"📅 {d.get('aktiv_seit') or '<i>дата регистрации?</i>'}"]
+        if d.get("badges"):
+            lines.append(f"🏷 {esc(badges_str(d['badges']))}")
+        extra = ([f"{d['followers']} подписч."] if d.get("followers") is not None else []) + \
+                ([f"{d['online_ads']} объявл."] if d.get("online_ads") is not None else [])
+        if extra:
+            lines.append("📦 " + " · ".join(extra))
+        if d.get("note"):
+            lines.append(f"📝 {esc(d['note'])}")
         return "\n".join(lines)
 
     def screen_card(self, chat_id: str, msg_id: Optional[int] = None, title: str = "Проверь данные") -> None:
@@ -2136,48 +2132,45 @@ class Bot:
         ready = d.get("name") and d.get("aktiv_seit")
         rows = [[btn("🔍 Искать", "c:go")]] if ready else []
         rows += [[btn("✏️ Имя", "c:name"), btn("📅 Дата", "c:date"), btn("🏷 Плашки", "c:badges")],
-                 [btn("📝 Заметка", "c:note"), btn("❌ Отмена", "c:cancel")]]
-        hint = "\n\nВсё верно? Жми «🔍 Искать» или исправь кнопками." if ready else \
-            "\n\nНе хватает имени или даты — задай кнопками ниже."
+                 [btn("📝 Заметка", "c:note"), btn("✖️ Отмена", "c:cancel")]]
+        hint = "" if ready else "\n\n<i>Нужны имя и дата</i>"
         d_date = parse_date(d.get("aktiv_seit") or "")
         dups = self.find_duplicates(d.get("name"), d_date) if ready else []
         if dups:
             hint = "\n\n" + self.duplicate_warning(d["name"], d_date, dups)
-            rows[0] = [btn("🚀 Всё равно искать", "c:force")]   # вместо «Искать» — явное подтверждение
-        self.show(chat_id, f"{title}:\n\n{self.draft_text(d)}{hint}", rows, msg_id)
+            rows[0] = [btn("⚠️ Всё равно искать", "c:force")]   # вместо «Искать» — явное подтверждение
+        self.show(chat_id, f"<b>{esc(title)}</b>\n{self.draft_text(d)}{hint}", rows, msg_id)
 
     def ask_note(self, chat_id: str, msg_id: Optional[int] = None) -> None:
         u = self.ui(chat_id)
         u["step"] = "note"
         cur = u["draft"].get("note")
         rows = [[btn("🗑 Без заметки", "c:nonote")]] if cur else []
-        self.show(chat_id, "📝 Напиши заметку к аккаунту — чей он, зачем ищем (например: «Петя, Audi A4»).\n"
-                           "Она будет в каждом уведомлении поиска и мониторинга."
-                  + (f"\n\nСейчас: {cur}" if cur else ""), rows + [[btn("⬅️ Назад", "c:back")]], msg_id)
+        self.show(chat_id, "📝 Чей аккаунт? Например: <i>Петя, Audi A4</i>" + (f"\nСейчас: {esc(cur)}" if cur else ""),
+                  rows + [[btn("⬅️ Назад", "c:back")]], msg_id)
 
     def ask_name(self, chat_id: str, msg_id: Optional[int] = None) -> None:
         u = self.ui(chat_id)
         u["step"] = "name"
-        self.show(chat_id, "👤 Напиши имя пользователя точно как на профиле\n(например: Arne Schwarzmann)",
-                  [[btn("❌ Отмена", "c:cancel")]], msg_id)
+        self.show(chat_id, "👤 Имя как на профиле", [[btn("✖️ Отмена", "c:cancel")]], msg_id)
 
     def year_picker(self, chat_id: str, msg_id: Optional[int] = None) -> None:
         self.ui(chat_id)["step"] = "date"
         years = [btn(str(y), f"d:y:{y}") for y in range(2009, date.today().year + 1)]
-        rows = chunked(years, 4) + [[btn("❌ Отмена", "c:cancel")]]
-        self.show(chat_id, "📅 Год регистрации («Aktiv seit»)?\nИли напиши дату текстом: 08.02.2017", rows, msg_id)
+        rows = chunked(years, 4) + [[btn("✖️ Отмена", "c:cancel")]]
+        self.show(chat_id, "📅 Год регистрации <i>(или текстом: 08.02.2017)</i>", rows, msg_id)
 
     def month_picker(self, chat_id: str, year: int, msg_id: Optional[int]) -> None:
         months = [btn(MONTHS_RU[m - 1], f"d:m:{year}:{m}") for m in range(1, 13)
                   if date(year, m, 1) <= date.today()]
-        self.show(chat_id, f"📅 {year} — месяц?", chunked(months, 4) + [[btn("⬅️ Год", "d:y")]], msg_id)
+        self.show(chat_id, f"📅 {year} · месяц", chunked(months, 4) + [[btn("⬅️", "d:y")]], msg_id)
 
     def day_picker(self, chat_id: str, year: int, month: int, msg_id: Optional[int]) -> None:
         import calendar
         days = [btn(str(d), f"d:d:{year}:{month}:{d}") for d in range(1, calendar.monthrange(year, month)[1] + 1)
                 if date(year, month, d) <= date.today()]
-        self.show(chat_id, f"📅 {MONTHS_RU[month - 1]} {year} — число?",
-                  chunked(days, 7) + [[btn("⬅️ Месяц", f"d:y:{year}")]], msg_id)
+        self.show(chat_id, f"📅 {MONTHS_RU[month - 1]} {year} · число",
+                  chunked(days, 7) + [[btn("⬅️", f"d:y:{year}")]], msg_id)
 
     def badge_picker(self, chat_id: str, msg_id: Optional[int] = None) -> None:
         u = self.ui(chat_id)
@@ -2185,14 +2178,13 @@ class Bot:
         badges = u["draft"].setdefault("badges", {})
         rows = []
         for code, (cat, options) in BADGE_PICKER.items():
-            rows.append([btn(f"— {CATEGORY_TITLE[cat]} —", "noop")])
+            rows.append([btn(CATEGORY_TITLE[cat], "noop")])
             row = [btn(("✅ " if badges.get(cat) == BADGE_LABELS[cat][key] else "") + label, f"b:{code}:{key or '-'}")
                    for key, label in options]
-            row.append(btn(("✅ " if cat not in badges else "") + "нет", f"b:{code}:x"))
+            row.append(btn(("✅ " if cat not in badges else "") + "—", f"b:{code}:x"))
             rows.append(row)
-        rows.append([btn("✅ Готово", "b:done")])
-        self.show(chat_id, f"🏷 Отметь плашки как на профиле (если плашки нет — «нет»).\n"
-                           f"Сейчас: {badges_str(badges)}", rows, msg_id)
+        rows.append([btn("Готово", "b:done")])
+        self.show(chat_id, f"🏷 Плашки как на профиле\n<i>{esc(badges_str(badges))}</i>", rows, msg_id)
 
     def after_name(self, chat_id: str) -> None:
         d = self.ui(chat_id)["draft"]
@@ -2221,8 +2213,8 @@ class Bot:
             return
         self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
         if msg_id:
-            self.tg.edit(chat_id, msg_id, f"✅ Принято:\n\n{self.draft_text(target.to_dict())}")
-        self.tg.send(chat_id, self.submit_search(target, force=True), [[btn("📋 Задачи", "t:refresh")]])
+            self.tg.edit(chat_id, msg_id, self.draft_text(target.to_dict()))
+        self.tg.send(chat_id, self.submit_search(target, force=True), [[btn(M_TASKS, "t:refresh")]])
 
     def set_draft_from_target(self, chat_id: str, target: Target, title: str) -> None:
         u = self.ui(chat_id)
@@ -2245,9 +2237,7 @@ class Bot:
                 self.state["watch"][key]["aktiv_seit"] = fmt_date(target.aktiv_seit)
             self.save()
         self.monitor_wakeup.set()
-        self.broadcast(f"👁 Слежу за {name or uid}{note_suffix(note)}\n{PROFILE_URL.format(uid=uid)}\n"
-                       f"Проверка каждые {self.cfg['monitor_minutes_min']}–{self.cfg['monitor_minutes_max']} мин."
-                       + ("" if note else "\nЧтобы подписать, чей это аккаунт: «👁 Мониторинг» → 📝."))
+        self.broadcast(f"👁 Слежу: {plink(uid, name)}{note_suffix(note)}")
         return True
 
     def set_watch_note(self, key: str, note: str) -> None:
@@ -2267,9 +2257,8 @@ class Bot:
 
     @staticmethod
     def watch_label(key: str, w: dict) -> str:
-        """«Arne Schwarzmann (ID 123) — 📝 Петя, Audi A4» — заметка видна в каждом сообщении."""
-        return f"{w.get('name') or 'ID ' + key}" + (f" (ID {key})" if w.get("name") else "") + \
-            (f" — 📝 {w['note']}" if w.get("note") else "")
+        """«Arne Schwarzmann · 📝 Петя» — имя кликабельное, заметка видна в каждом сообщении."""
+        return plink(key, w.get("name")) + note_suffix(w.get("note"))
 
     def check_watch(self, key: str) -> list[str]:
         """Проверяет один аккаунт. Возвращает сообщения для отправки."""
@@ -2288,10 +2277,9 @@ class Bot:
                 # ошибка/пустая страница: список «виденных» НЕ трогаем, иначе всё придёт как новое
                 w["fails"] = w.get("fails", 0) + 1
                 if res.status == "missing" and w["fails"] == 3:
-                    out.append(f"⚠️ Профиль {label} не открывается (удалён?): {PROFILE_URL.format(uid=key)}")
+                    out.append(f"⚠️ {label} — профиль не открывается (удалён?)")
                 elif manual:
-                    out.append(f"⚠️ {label}: не удалось открыть профиль ({res.error or res.status}), повторю позже."
-                               f"\n{PROFILE_URL.format(uid=key)}")
+                    out.append(f"⚠️ {label} — не открылся ({esc(res.error or res.status)}), повторю позже")
                 w["next"] = now + 5 * 60
                 return out
             prof = res.profile
@@ -2306,8 +2294,7 @@ class Bot:
             if w["seen"] is None:
                 w["seen"] = sorted(current)
                 titles.update({ad_id: ad.get("title", "") for ad_id, ad in current.items()})
-                out.append(f"📋 {label}: сейчас {len(current)} объявл. — запомнил, буду присылать только новые."
-                           f"\n{PROFILE_URL.format(uid=key)}")
+                out.append(f"📋 {label} · {len(current)} объявл. — дальше только новые")
             else:
                 seen = set(w["seen"])
                 fresh = []
@@ -2324,19 +2311,18 @@ class Bot:
                     w.setdefault("new_ads", []).append({
                         "id": ad_id, "title": ad.get("title", ""), "price": ad.get("price", ""),
                         "url": ad.get("url", ""), "at": now, "was": old_title})
-                    head = f"🆕 Новое объявление у {label}" if not old_title else \
-                        f"✏️ Объявление заменено у {label}\nбыло: {old_title}"
-                    out.append(f"{head}\n\n{ad.get('title') or 'без названия'}"
-                               + (f"\n💶 {ad['price']}" if ad.get("price") else "")
-                               + f"\n{ad.get('url', '')}\nПрофиль: {PROFILE_URL.format(uid=key)}")
+                    title = ad.get("title") or "без названия"
+                    ad_line = (link(title, ad["url"]) if ad.get("url") else esc(title)) \
+                        + (f" · {esc(ad['price'])}" if ad.get("price") else "")
+                    out.append(("🆕 " if not old_title else "✏️ ") + f"<b>{ad_line}</b>\n{label}"
+                               + (f"\n<i>было: {esc(old_title)}</i>" if old_title else ""))
                 w["new_ads"] = w.get("new_ads", [])[-300:]
                 # объединяем, а не заменяем: временно скрытое объявление не придёт повторно
                 w["seen"] = sorted(seen | set(current), key=lambda x: int(x) if x.isdigit() else 0)[-3000:]
                 # названия нужны только для объявлений, которые сейчас на странице (ловим замену названия)
                 w["titles"] = {ad_id: titles.get(ad_id, ad.get("title", "")) for ad_id, ad in current.items()}
                 if (manual or self.cfg.get("monitor_every_check")) and not out:
-                    out.append(f"✅ {label}: новых объявлений нет (на странице {len(current)})."
-                               f"\n{PROFILE_URL.format(uid=key)}")
+                    out.append(f"✅ {label} — новых нет ({len(current)})")
             w["last"] = now
             lo, hi = self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"]
             w["next"] = now + random.uniform(lo, hi) * 60
@@ -2377,18 +2363,18 @@ class Bot:
             if w is None:
                 continue
             ads = w.get("new_ads") or []
-            head = f"📜 {self.watch_label(key, w)} — новых объявлений: {len(ads)}"
+            head = f"📜 {self.watch_label(key, w)} · новых {len(ads)}"
             if not ads:
-                blocks.append(head + "\n   пока ни одного нового с момента добавления в мониторинг")
+                blocks.append(head)
                 continue
             lines = [head]
-            for i, ad in enumerate(ads, 1):
+            for ad in reversed(ads):
                 when = time.strftime("%d.%m %H:%M", time.localtime(ad.get("at", 0)))
-                was = f" (вместо «{ad['was']}»)" if ad.get("was") else ""
-                lines.append(f"{i}. {when} — {ad.get('title') or 'без названия'}{was}"
-                             + (f" — {ad['price']}" if ad.get("price") else "") + f"\n   {ad.get('url', '')}")
+                title = ad.get("title") or "без названия"
+                lines.append(f"{when} · " + (link(title, ad["url"]) if ad.get("url") else esc(title))
+                             + (f" · {esc(ad['price'])}" if ad.get("price") else "") + (" ✏️" if ad.get("was") else ""))
             blocks.append("\n".join(lines))
-        return "\n\n".join(blocks) or "В мониторинге никого нет."
+        return "\n\n".join(blocks) or "В мониторинге никого нет"
 
     def active_watch_keys(self) -> list[str]:
         """Аккаунты, которые после добавления в мониторинг хоть раз залили (или заменили) объявление.
@@ -2402,9 +2388,8 @@ class Bot:
         keys = self.active_watch_keys()
         total = len(self.state["watch"])
         if not keys:
-            return (f"🔥 Активных пока нет: ни один из {total} аккаунтов не заливал новых объявлений "
-                    f"с момента добавления в мониторинг."), None
-        lines = [f"🔥 Активные аккаунты — заливали товар после начала мониторинга: {len(keys)} из {total}"]
+            return f"🔥 Активных нет · 0/{total}", None
+        lines = [f"🔥 <b>Активные</b> · {len(keys)}/{total}"]
         buttons = []
         for i, key in enumerate(keys, 1):
             w = self.state["watch"][key]
@@ -2413,11 +2398,9 @@ class Bot:
             n_repl = len(ads) - n_new
             last_ad = max(ads, key=lambda a: a.get("at", 0))
             when = time.strftime("%d.%m %H:%M", time.localtime(last_ad.get("at", 0)))
-            counts = f"🆕 {n_new}" + (f" · ✏️ {n_repl}" if n_repl else "")
-            lines.append(f"\n{i}. {self.watch_label(key, w)}\n   {counts} · последнее {when}: "
-                         f"{last_ad.get('title') or 'без названия'}\n   {PROFILE_URL.format(uid=key)}")
+            lines.append(f"{i}. {self.watch_label(key, w)} · 🆕{n_new}" + (f" ✏️{n_repl}" if n_repl else "")
+                         + f" · {when}")
             buttons.append(btn(f"{i}. {(w.get('note') or w.get('name') or key)[:14]}", f"w:card:{key}"))
-        lines.append("\nНажми на аккаунт — откроется его карточка (там «📜 Новые» — все его объявления).")
         return "\n".join(lines), chunked(buttons, 3)
 
     def refresh_views(self) -> int:
@@ -2550,17 +2533,17 @@ document.getElementById("q").addEventListener("input", e => {{
             busy = self._report_lock = threading.Lock()
         if not busy.acquire(blocking=False):
             for chat_id in chat_ids:
-                self.tg.send(chat_id, "⏳ Таблица уже собирается — пришлю, как будет готова.")
+                self.tg.send(chat_id, "⏳ Таблица уже собирается")
             return
         try:
             self.refresh_views()
             with self.lock:
                 doc, summary = self.export_ads_html()
             name = time.strftime("ads_%Y-%m-%d_%H-%M.html")
-            head = "📊 Отчёт по объявлениям (авто)" if auto else "📥 Выгрузка объявлений"
+            head = "📊 Объявления · авто" if auto else "📥 Объявления"
             for chat_id in chat_ids:
                 if not self.tg.send_document(chat_id, name, doc.encode("utf-8"), caption=f"{head}\n{summary}"):
-                    self.tg.send(chat_id, "⚠️ Не получилось отправить файл, присылаю текстом.\n\n"
+                    self.tg.send(chat_id, "⚠️ Файл не отправился, присылаю текстом\n\n"
                                  + self.new_ads_text(list(self.state["watch"])))
             if auto:
                 with self.lock:
@@ -2579,10 +2562,10 @@ document.getElementById("q").addEventListener("input", e => {{
 
     def send_export(self, chat_id: str) -> None:
         if not self.state["watch"]:
-            self.tg.send(chat_id, "В мониторинге никого нет — выгружать нечего.")
+            self.tg.send(chat_id, "В мониторинге никого нет")
             return
         n = sum(1 for w in self.state["watch"].values() for r in (w.get("ads") or {}).values() if not r.get("gone"))
-        self.tg.send(chat_id, f"⏳ Собираю просмотры по {n} объявлениям и делаю таблицу…")
+        self.tg.send(chat_id, f"⏳ Собираю таблицу · {n} объявл.")
         threading.Thread(target=self._send_report, args=([chat_id], False), daemon=True).start()
 
     def report_due(self) -> bool:
@@ -2604,8 +2587,7 @@ document.getElementById("q").addEventListener("input", e => {{
                     n = len(self.state["watch"].get(key, {}).get("new_ads") or [])
                     for text in messages:
                         new_ad = text.startswith(("🆕", "✏️"))
-                        self.broadcast(text, [[btn(f"📜 Все новые у этого аккаунта ({n})", f"w:ads:{key}")]]
-                                       if new_ad else None)
+                        self.broadcast(text, [[btn(f"📜 Все новые ({n})", f"w:ads:{key}")]] if new_ad else None)
                 if self.report_due():
                     self._send_report(list(self.cfg["allowed_chat_ids"]), auto=True)
             except Exception:
@@ -2633,41 +2615,32 @@ document.getElementById("q").addEventListener("input", e => {{
         page = u.get("mon_page", 0) if page is None else page
         page = min(max(0, page), pages - 1)
         u["mon_page"] = page
-        lines = [f"👁 Мониторинг (проверка каждые {lo}–{hi} мин) — аккаунтов: {len(keys)}"]
-        rows = [[btn("➕ Добавить", "w:new")] + ([btn(f"🔄 Проверить всех ({len(keys)})", "w:all")] if w else [])]
+        lines = [f"👁 <b>Мониторинг</b> · {len(keys)}" + (f" · стр. {page + 1}/{pages}" if pages > 1 else "")]
+        rows = [[btn("➕ Добавить", "w:new")] + ([btn(f"🔄 Проверить всех", "w:all")] if w else [])]
         if w:
             n_active = len(self.active_watch_keys())
             n_ads = sum(len(x.get("ads") or {}) for x in w.values())
-            rows.append([btn(f"📥 Таблица всех объявлений ({n_ads})", "w:export")])
-            rows.append([btn("📜 Новые текстом", "w:ads:*"), btn(f"🔥 Активные ({n_active})", "w:active")])
+            rows.append([btn(f"📥 Таблица ({n_ads})", "w:export"), btn(f"🔥 Активные ({n_active})", "w:active")])
         start = page * self.MONITOR_PAGE
         acc_buttons = []
         for i, key in enumerate(keys[start:start + self.MONITOR_PAGE], start + 1):
             item = w[key]
-            last = time.strftime("%H:%M", time.localtime(item["last"])) if item.get("last") else "—"
             n_new = len(item.get("new_ads") or [])
             name = item.get("name") or f"ID {key}"
-            since = self.watch_added_str(item, "%d.%m").replace("не позже ", "≤")
-            lines.append(f"{i}. {name}" + (f" — 📝 {item['note']}" if item.get("note") else "")
-                         + (f" · с {since}" if since else "")
-                         + f" · {len(item.get('seen') or [])} объявл." + (f" · 🆕{n_new}" if n_new else "")
-                         + f" · {last}")
+            lines.append(f"{i}. {esc(name)}" + (f" · <i>{esc(item['note'])}</i>" if item.get("note") else "")
+                         + (f" · 🆕{n_new}" if n_new else ""))
             acc_buttons.append(btn(f"{i}. {(item.get('note') or name)[:14]}", f"w:card:{key}"))
         rows += chunked(acc_buttons, 3)
         if not w:
-            lines.append("Пока никого. Найденные поиском добавляются сами, или нажми «➕ Добавить».")
-        else:
-            lines.append("\nНажми на аккаунт — откроется карточка: проверить, новые объявления, заметка, убрать.")
+            lines.append("<i>Пусто. Найденные поиском добавляются сами.</i>")
         if pages > 1:
-            lines.append(f"Страница {page + 1} из {pages}")
             rows.append([btn("◀️", f"w:pg:{page - 1}") if page > 0 else btn("·", "noop"),
                          btn(f"{page + 1}/{pages}", "noop"),
                          btn("▶️", f"w:pg:{page + 1}") if page < pages - 1 else btn("·", "noop")])
         every = self.cfg.get("monitor_every_check")
-        rows.append([btn(f"⏱ Интервал: {lo}–{hi} мин", "w:int"),
-                     btn("🔔 О каждой проверке: " + ("вкл" if every else "выкл"), "w:every")])
         rh = int(self.cfg.get("report_hours") or 0)
-        rows.append([btn("📊 Авто-таблица: " + (f"каждые {rh} ч" if rh else "выкл"), "w:rep")])
+        rows.append([btn(f"⏱ {lo}–{hi} мин", "w:int"), btn("🔔 " + ("вкл" if every else "выкл"), "w:every"),
+                     btn("📊 " + (f"{rh} ч" if rh else "выкл"), "w:rep")])
         self.show(chat_id, "\n".join(lines), rows, msg_id)
 
     def screen_watch_card(self, chat_id: str, key: str, msg_id: Optional[int] = None, note: str = "") -> None:
@@ -2675,29 +2648,27 @@ document.getElementById("q").addEventListener("input", e => {{
         if item is None:
             self.screen_monitor(chat_id, msg_id)
             return
-        last = time.strftime("%d.%m %H:%M", time.localtime(item["last"])) if item.get("last") else "ещё не было"
+        last = time.strftime("%d.%m %H:%M", time.localtime(item["last"])) if item.get("last") else "—"
         n_new = len(item.get("new_ads") or [])
-        added = self.watch_added_str(item, "%d.%m.%Y %H:%M") or "неизвестно (добавлен до обновления бота)"
-        lines = [f"👤 {item.get('name') or 'ID ' + key} (ID {key})",
-                 f"📝 Заметка: {item.get('note') or '—'}",
-                 f"📅 Добавлен в мониторинг: {added}",
-                 f"Объявлений на странице: {len(item.get('seen') or [])}",
-                 f"Новых замечено с начала мониторинга: {n_new}",
-                 f"Последняя проверка: {last}",
-                 PROFILE_URL.format(uid=key)]
+        added = self.watch_added_str(item, "%d.%m.%Y %H:%M") or "дата неизвестна"
+        lines = [f"👤 <b>{plink(key, item.get('name'))}</b> · ID {key}"]
+        if item.get("note"):
+            lines.append(f"📝 {esc(item['note'])}")
+        lines += [f"📅 в мониторинге с {added}",
+                  f"📦 {len(item.get('seen') or [])} объявл." + (f" · 🆕 {n_new}" if n_new else ""),
+                  f"<i>проверка {last}</i>"]
         if note:
             lines.append("\n" + note)
-        rows = [[btn("🔍 Проверить сейчас", f"w:chk:{key}"), btn(f"📜 Новые ({n_new})", f"w:ads:{key}")],
+        rows = [[btn("🔍 Проверить", f"w:chk:{key}"), btn(f"📜 Новые ({n_new})", f"w:ads:{key}")],
                 [btn("📝 Заметка", f"w:note:{key}"), btn("🗑 Убрать", f"w:delask:{key}")],
-                [btn("⬅️ К списку", "w:list")]]
+                [btn("⬅️ Назад", "w:list")]]
         self.show(chat_id, "\n".join(lines), rows, msg_id)
 
     def screen_interval(self, chat_id: str, msg_id: Optional[int]) -> None:
         cur = (self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"])
         rows = [[btn(("✅ " if (lo, hi) == cur else "") + f"{lo}–{hi} мин", f"w:iv:{lo}:{hi}")
                  for lo, hi in INTERVAL_CHOICES], [btn("⬅️ Назад", "w:list")]]
-        self.show(chat_id, "⏱ Как часто проверять новые объявления?\n(время каждый раз случайное в этих пределах)",
-                  rows, msg_id)
+        self.show(chat_id, "⏱ Как часто проверять?", rows, msg_id)
 
     # ------------------------------------------------------------------
     # прокси и скорость
@@ -2705,23 +2676,19 @@ document.getElementById("q").addEventListener("input", e => {{
     def screen_proxy(self, chat_id: str, msg_id: Optional[int] = None, note: str = "") -> None:
         proxies = proxy_list(self.cfg)
         rps = self.cfg["requests_per_second"]
-        workers = getattr(self.fetcher, "worker_count", lambda: 6)()
-        lines = ["🌐 Прокси и скорость"]
+        lines = [f"🌐 <b>Прокси</b> · {rps}/с на IP · до {rps * max(1, len(proxies))}/с"]
         if proxies:
             info = self.fetcher.lanes_info() if hasattr(self.fetcher, "lanes_info") else [mask_proxy(p) for p in proxies]
-            lines += [f"{i + 1}. {x}" for i, x in enumerate(info)]
+            lines += [f"{i + 1}. {esc(x)}" for i, x in enumerate(info)]
         else:
-            lines.append("Прокси нет — запросы идут напрямую с этого компьютера.")
-        lines.append(f"\nСкорость: {rps}/с на каждый прокси → всего до {rps * max(1, len(proxies))}/с, "
-                     f"потоков {workers} (подбираются сами)")
-        lines.append("Больше прокси = быстрее поиск: сайт ограничивает каждый IP отдельно.")
+            lines.append("<i>Без прокси — напрямую</i>")
         if note:
             lines.append("\n" + note)
         rows = [[btn(f"🗑 {i + 1}. {mask_proxy(p)[:30]}", f"p:del:{i}")] for i, p in enumerate(proxies)]
         rows.append([btn("➕ Добавить", "p:set")] + ([btn("🧪 Проверить", "p:test")] if proxies else []))
         if proxies:
-            rows.append([btn("🚫 Удалить все (без прокси)", "p:off")])
-        rows.append([btn(("✅" if r == rps else "") + f"{r}/с", f"p:rps:{r}") for r in RPS_CHOICES])
+            rows.append([btn("🚫 Удалить все", "p:off")])
+        rows.append([btn(("• " if r == rps else "") + f"{r}/с", f"p:rps:{r}") for r in RPS_CHOICES])
         self.show(chat_id, "\n".join(lines), rows, msg_id)
 
     def set_proxies(self, urls: list[str]) -> None:
@@ -2742,17 +2709,17 @@ document.getElementById("q").addEventListener("input", e => {{
         try:
             ip = s.get("https://api.ipify.org?format=json", timeout=20).json().get("ip")
         except Exception as exc:
-            return f"❌ {head}: нет соединения ({type(exc).__name__})"
+            return f"❌ {head} — нет связи ({type(exc).__name__})"
         try:
             t0 = time.time()
             r = s.get(PROFILE_URL.format(uid=uid), timeout=25)
             dt = time.time() - t0
             if r.status_code == 200 and looks_like_profile(r.text):
-                return f"✅ {head}: IP {ip}, Kleinanzeigen открывается за {dt:.1f} с"
-            why = " — похоже на блокировку" if r.status_code in (403, 429) or looks_blocked(r.text) else ""
-            return f"⚠️ {head}: IP {ip}, Kleinanzeigen ответил {r.status_code}{why}"
+                return f"✅ {head} · {ip} · {dt:.1f} с"
+            why = " (блокировка?)" if r.status_code in (403, 429) or looks_blocked(r.text) else ""
+            return f"⚠️ {head} · {ip} · ответ {r.status_code}{why}"
         except Exception as exc:
-            return f"❌ {head}: IP {ip}, Kleinanzeigen не открывается ({type(exc).__name__})"
+            return f"❌ {head} · {ip} · сайт не открылся ({type(exc).__name__})"
 
     def proxy_test(self, chat_id: str) -> None:
         anchors = self.anchors.items()
@@ -2760,17 +2727,17 @@ document.getElementById("q").addEventListener("input", e => {{
         proxies = proxy_list(self.cfg) or [""]
         with ThreadPoolExecutor(max_workers=min(8, len(proxies))) as pool:
             lines = list(pool.map(lambda p: self._test_one(p, uid), proxies))
-        self.tg.send(chat_id, "🧪 Проверка прокси:\n" + "\n".join(lines), [[btn("🌐 Прокси", "p:menu")]])
+        self.tg.send(chat_id, "🧪 <b>Прокси</b>\n" + "\n".join(esc(x) for x in lines), [[btn(M_PROXY, "p:menu")]])
 
     # ------------------------------------------------------------------
     # входящие: текст, фото, кнопки
     # ------------------------------------------------------------------
     def handle_photo(self, chat_id: str, file_id: str) -> None:
-        self.tg.send(chat_id, "📸 Распознаю скриншот…")
+        self.tg.send(chat_id, "📸 Распознаю…")
         try:
             text = ocr_image(self.tg.download(file_id), self.cfg["tesseract_cmd"])
         except Exception as exc:
-            self.tg.send(chat_id, f"Ошибка распознавания: {exc}\nМожно ввести данные через «{M_SEARCH}».")
+            self.tg.send(chat_id, f"⚠️ Не распознал: {esc(exc)}\nВведи вручную — {M_SEARCH}")
             return
         log.info("OCR:\n%s", text)
         name, d, badges, followers, online = parse_ocr_text(text)
@@ -2778,13 +2745,14 @@ document.getElementById("q").addEventListener("input", e => {{
             u = self.ui(chat_id)
             u["draft"] = {"name": name, "aktiv_seit": fmt_date(d) if d else None, "badges": badges,
                           "followers": followers, "online_ads": online}
-        self.screen_card(chat_id, title="📸 Распознано со скриншота")
+        self.screen_card(chat_id, title="📸 Со скриншота")
 
     def handle_text(self, chat_id: str, text: str) -> None:
         u = self.ui(chat_id)
         menu = {M_SEARCH: lambda: self.start_wizard(chat_id), M_TASKS: lambda: self.screen_tasks(chat_id),
                 M_STATUS: lambda: self.screen_status(chat_id), M_RESULTS: lambda: self.screen_results(chat_id),
                 M_MONITOR: lambda: self.screen_monitor(chat_id), M_PROXY: lambda: self.screen_proxy(chat_id)}
+        text = OLD_MENU.get(text, text)
         if text in menu:
             if u["step"] in ("proxy", "watch", "watch_note", "run_note"):
                 u["step"] = None
@@ -2801,7 +2769,7 @@ document.getElementById("q").addEventListener("input", e => {{
         elif step == "date":
             d = parse_date(text)
             if not d:
-                self.tg.send(chat_id, "Не понял дату. Формат: 08.02.2017 — или выбери кнопками выше.")
+                self.tg.send(chat_id, "Не понял дату. Формат: 08.02.2017")
                 return
             u["draft"]["aktiv_seit"] = fmt_date(d)
             self.after_date(chat_id, None)
@@ -2813,24 +2781,22 @@ document.getElementById("q").addEventListener("input", e => {{
         elif step == "watch":
             uid, note = parse_watch_input(text)
             if not uid:
-                self.tg.send(chat_id, "Пришли ID (цифры) или ссылку на профиль с userId=…, "
-                                      "а после пробела — заметку, например:\n12345678 Петя, Audi A4")
+                self.tg.send(chat_id, "Нужен ID или ссылка с userId=…\nНапример: <code>12345678 Петя, Audi A4</code>")
                 return
             u["step"] = None
             if not self.add_watch(uid, note=note):
                 if note:
                     self.set_watch_note(str(uid), note)
-                self.tg.send(chat_id, "Этот профиль уже в мониторинге" + (" — заметку обновил." if note else "."))
+                self.tg.send(chat_id, "Уже в мониторинге" + (" · заметка обновлена" if note else ""))
             self.screen_monitor(chat_id)
         elif step == "run_note":
             num = u.pop("run_num", None)
             u["step"] = None
             note = "" if text.strip() in ("-", "—") else re.sub(r"\s+", " ", text).strip()[:200]
             if num is not None and self.set_run_note(int(num), note):
-                self.tg.send(chat_id, f"📝 Заметка к поиску #{num} " + (f"сохранена: {note}" if note else "убрана")
-                             + ". Она будет во всех следующих сообщениях по этому поиску.")
+                self.tg.send(chat_id, f"📝 #{num}: " + (esc(note) if note else "заметка убрана"))
             else:
-                self.tg.send(chat_id, f"Поиск #{num} уже закончен — заметку можно поставить в «{M_MONITOR}» → 📝.")
+                self.tg.send(chat_id, f"#{num} уже закончен — заметку можно поставить в {M_MONITOR}")
             self.screen_tasks(chat_id)
         elif step == "watch_note":
             key = u.pop("watch_key", None)
@@ -2838,7 +2804,7 @@ document.getElementById("q").addEventListener("input", e => {{
             if key:
                 note = "" if text.strip() in ("-", "—") else re.sub(r"\s+", " ", text).strip()[:200]
                 self.set_watch_note(key, note)
-                self.screen_watch_card(chat_id, key, note="✅ Заметка сохранена." if note else "Заметка убрана.")
+                self.screen_watch_card(chat_id, key, note="✅ Сохранено" if note else "Заметка убрана")
             else:
                 self.screen_monitor(chat_id)
         else:
@@ -2846,8 +2812,8 @@ document.getElementById("q").addEventListener("input", e => {{
             if target:
                 self.set_draft_from_target(chat_id, target, "Понял так")
             else:
-                self.tg.send(chat_id, "Не понял 🤔 Пользуйся кнопками меню или пришли скриншот профиля.\n"
-                                      "Текстом: Manuela 08.02.2017 top, sehr freundlich", keyboard=MAIN_KEYBOARD)
+                self.tg.send(chat_id, "Не понял. Пришли скриншот или текстом: <code>Manuela 08.02.2017 top</code>",
+                             keyboard=MAIN_KEYBOARD)
 
     def start_wizard(self, chat_id: str) -> None:
         self.state["ui"][chat_id] = {"step": None, "draft": {"badges": {}}, "then": "flow"}
@@ -2861,17 +2827,16 @@ document.getElementById("q").addEventListener("input", e => {{
         urls = [normalize_proxy(ln) for ln in lines]
         if not urls or any(u is None for u in urls):
             bad = [ln for ln, u in zip(lines, urls) if u is None]
-            self.tg.send(chat_id, f"Не похоже на прокси: {mask_proxy(bad[0]) if bad else '(пусто)'}\nПримеры:\n"
-                                  "socks5://логин:пароль@1.2.3.4:5000\nлогин:пароль@1.2.3.4:5000\n"
-                                  "1.2.3.4:5000:логин:пароль\nМожно несколько — каждый с новой строки.",
-                         [[btn("❌ Отмена", "p:menu")]])
+            self.tg.send(chat_id, f"Не похоже на прокси: {esc(mask_proxy(bad[0]) if bad else '(пусто)')}\n"
+                                  "<code>socks5://логин:пароль@1.2.3.4:5000</code>\n"
+                                  "<code>1.2.3.4:5000:логин:пароль</code>",
+                         [[btn("✖️ Отмена", "p:menu")]])
             return
         self.ui(chat_id)["step"] = None
         current = proxy_list(self.cfg)
         added = [u for u in dict.fromkeys(urls) if u not in current]
         self.set_proxies(current + added)
-        self.screen_proxy(chat_id, note=f"✅ Добавлено прокси: {len(added)} (сообщение с паролем удалено). "
-                                        f"Нажми «🧪 Проверить».")
+        self.screen_proxy(chat_id, note=f"✅ Добавлено: {len(added)} · сообщение с паролем удалено")
 
     def handle_command(self, chat_id: str, text: str) -> None:
         cmd, _, arg = text.partition(" ")
@@ -2886,7 +2851,7 @@ document.getElementById("q").addEventListener("input", e => {{
             self.confirm(chat_id)
         elif cmd in ("/cancel", "/clear"):
             self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
-            self.tg.send(chat_id, "Ввод сброшен.", keyboard=MAIN_KEYBOARD)
+            self.tg.send(chat_id, "Сброшено", keyboard=MAIN_KEYBOARD)
         elif cmd == "/status":
             self.screen_status(chat_id)
         elif cmd in ("/tasks", "/pause", "/resume", "/stop"):
@@ -2915,9 +2880,9 @@ document.getElementById("q").addEventListener("input", e => {{
             else:
                 self.anchors.add(int(parts[0]), d)
                 self.anchors.flush()
-                self.tg.send(chat_id, f"Добавлено: {parts[0]} → {fmt_date(d)} (всего {len(self.anchors):,})")
+                self.tg.send(chat_id, f"✅ {parts[0]} → {fmt_date(d)} · всего {len(self.anchors):,}")
         else:
-            self.tg.send(chat_id, "Не знаю такую команду — пользуйся кнопками меню.", keyboard=MAIN_KEYBOARD)
+            self.tg.send(chat_id, "Нет такой команды", keyboard=MAIN_KEYBOARD)
 
     def handle_callback(self, chat_id: str, data: str, msg_id: int) -> None:
         u = self.ui(chat_id)
@@ -2936,7 +2901,7 @@ document.getElementById("q").addEventListener("input", e => {{
                 self.confirm(chat_id, msg_id, force=True)
             elif act == "cancel":
                 self.state["ui"][chat_id] = {"step": None, "draft": {}, "then": "flow"}
-                self.tg.edit(chat_id, msg_id, "❌ Отменено.")
+                self.tg.edit(chat_id, msg_id, "✖️ Отменено")
             elif act == "name":
                 u["then"] = "card"
                 self.ask_name(chat_id, msg_id)
@@ -2990,15 +2955,13 @@ document.getElementById("q").addEventListener("input", e => {{
             if parts[1] == "note":
                 run = self.runs.get(int(parts[2]))
                 if run is None:
-                    self.tg.send(chat_id, f"Поиск #{parts[2]} уже закончен.")
+                    self.tg.send(chat_id, f"#{parts[2]} уже закончен")
                     self.screen_tasks(chat_id, msg_id)
                     return
                 u["step"], u["run_num"] = "run_note", run.num
                 cur = run.target.note
-                self.show(chat_id, f"📝 Заметка к поиску #{run.num} ({run.target.name}, "
-                                   f"{fmt_date(run.target.aktiv_seit)}) — чей это аккаунт?\n"
-                                   + (f"Сейчас: {cur}\n" if cur else "")
-                                   + "Напиши заметку («-» — убрать). Поиск при этом не останавливается.",
+                self.show(chat_id, f"📝 #{run.num} {esc(run.target.name)} — чей аккаунт?"
+                                   + (f"\nСейчас: {esc(cur)}" if cur else "") + "\n<i>«-» — убрать</i>",
                           [[btn("⬅️ Назад", "t:refresh")]], msg_id)
                 return
             uid = int(parts[3]) if len(parts) > 3 else None
@@ -3017,12 +2980,12 @@ document.getElementById("q").addEventListener("input", e => {{
             if act == "add":
                 uid = int(parts[2])
                 if not self.add_watch(uid, note=self.notes_by_uid.get(uid, ""), target=self.targets_by_uid.get(uid)):
-                    self.tg.send(chat_id, "Этот профиль уже в мониторинге.")
+                    self.tg.send(chat_id, "Уже в мониторинге")
                 return
             if act == "new":
                 u["step"] = "watch"
-                self.show(chat_id, "➕ Пришли ID пользователя или ссылку на профиль (…userId=12345).\n"
-                                   "Через пробел можно сразу заметку — чей аккаунт:\n12345678 Петя, Audi A4",
+                self.show(chat_id, "➕ ID или ссылка на профиль, через пробел — заметка\n"
+                                   "<code>12345678 Петя, Audi A4</code>",
                           [[btn("⬅️ Назад", "w:list")]], msg_id)
                 return
             if act == "pg":
@@ -3047,8 +3010,8 @@ document.getElementById("q").addEventListener("input", e => {{
                     return
                 u["step"], u["watch_key"] = "watch_note", key
                 cur = item.get("note")
-                self.show(chat_id, f"📝 Заметка к {item.get('name') or key} (ID {key}) — чей это аккаунт?\n"
-                                   + (f"Сейчас: {cur}\n" if cur else "") + "Напиши новую («-» — убрать).",
+                self.show(chat_id, f"📝 {esc(item.get('name') or key)} — чей аккаунт?"
+                                   + (f"\nСейчас: {esc(cur)}" if cur else "") + "\n<i>«-» — убрать</i>",
                           [[btn("⬅️ Назад", f"w:card:{key}")]], msg_id)
                 return
             if act == "every":
@@ -3070,14 +3033,12 @@ document.getElementById("q").addEventListener("input", e => {{
                 if item is None:
                     self.screen_monitor(chat_id, msg_id)
                     return
-                self.show(chat_id, f"🗑 Убрать из мониторинга {self.watch_label(parts[2], item)}?\n"
-                                   f"Новые объявления по нему больше не будут приходить.",
-                          [[btn("✅ Да, убрать", f"w:del:{parts[2]}"), btn("❌ Нет", f"w:card:{parts[2]}")]], msg_id)
+                self.show(chat_id, f"🗑 Убрать {self.watch_label(parts[2], item)} из мониторинга?",
+                          [[btn("Да, убрать", f"w:del:{parts[2]}"), btn("Нет", f"w:card:{parts[2]}")]], msg_id)
                 return
             if act == "chk":
                 self.request_check([parts[2]])
-                self.screen_watch_card(chat_id, parts[2], msg_id,
-                                       note="🔍 Проверяю… результат придёт отдельным сообщением.")
+                self.screen_watch_card(chat_id, parts[2], msg_id, note="🔍 Проверяю…")
                 return
             if act == "del":
                 with self.lock:
@@ -3085,8 +3046,7 @@ document.getElementById("q").addEventListener("input", e => {{
                     self.save()
             elif act == "all":
                 self.request_check(list(self.state["watch"]))
-                self.tg.send(chat_id, f"🔍 Проверяю все {len(self.state['watch'])} аккаунтов — по каждому придёт "
-                                      f"результат: новые объявления или «новых нет».")
+                self.tg.send(chat_id, f"🔍 Проверяю {len(self.state['watch'])} аккаунтов")
             elif act == "int":
                 self.screen_interval(chat_id, msg_id)
                 return
@@ -3100,10 +3060,8 @@ document.getElementById("q").addEventListener("input", e => {{
             act = parts[1]
             if act == "set":
                 u["step"] = "proxy"
-                self.show(chat_id, "➕ Пришли прокси одним сообщением, например:\n"
-                                   "socks5://логин:пароль@1.2.3.4:5000\n"
-                                   "Можно сразу несколько — каждый с новой строки.\n"
-                                   "(сообщение с паролем я сразу удалю из чата)", [[btn("❌ Отмена", "p:menu")]], msg_id)
+                self.show(chat_id, "➕ Прокси, по одному в строке\n<code>socks5://логин:пароль@1.2.3.4:5000</code>\n"
+                                   "<i>сообщение с паролем удалю</i>", [[btn("✖️ Отмена", "p:menu")]], msg_id)
                 return
             if act == "off":
                 self.set_proxies([])
@@ -3115,7 +3073,7 @@ document.getElementById("q").addEventListener("input", e => {{
             elif act == "rps":
                 self.save_config(requests_per_second=int(parts[2]))
             elif act == "test":
-                self.tg.send(chat_id, "🧪 Проверяю прокси…")
+                self.tg.send(chat_id, "🧪 Проверяю…")
                 threading.Thread(target=self.proxy_test, args=(chat_id,), daemon=True).start()
                 return
             u["step"] = None
@@ -3151,7 +3109,7 @@ document.getElementById("q").addEventListener("input", e => {{
         elif "text" in msg:
             with self.lock:
                 if self.ui(chat_id)["step"] == "proxy" and not msg["text"].startswith("/") \
-                        and msg["text"] not in (M_SEARCH, M_TASKS, M_STATUS, M_RESULTS, M_MONITOR, M_PROXY):
+                        and msg["text"] not in (M_SEARCH, M_TASKS, M_STATUS, M_RESULTS, M_MONITOR, M_PROXY, *OLD_MENU):
                     self.handle_proxy_input(chat_id, msg["text"], msg.get("message_id"))
                 else:
                     self.handle_text(chat_id, msg["text"].strip())
@@ -3172,8 +3130,7 @@ document.getElementById("q").addEventListener("input", e => {{
                                                 {"command": "cancel", "description": "Сбросить ввод"}])
         threading.Thread(target=self.monitor_loop, name="monitor", daemon=True).start()
         for chat_id in self.cfg["allowed_chat_ids"]:
-            self.tg.send(chat_id, "🤖 Бот запущен. Меню — кнопками внизу, или пришли скриншот профиля.",
-                         keyboard=MAIN_KEYBOARD)
+            self.tg.send(chat_id, "🤖 Бот запущен", keyboard=MAIN_KEYBOARD)
         offset = self.state.get("offset")
         while True:
             try:
