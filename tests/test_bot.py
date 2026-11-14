@@ -1038,23 +1038,68 @@ class TestMonitorAds(unittest.TestCase):
 
     def test_export_all_ads_file(self):
         self.bot.state["watch"]["6"] = {"name": "Quiet", "note": "", "seen": ["9"], "next": 9e12, "fails": 0}
-        self.check({"1": "Altes"})
+        self.check({"1": "Altes"})                             # было ещё до мониторинга — тоже в таблице
         self.check({"1": "Altes", "2": "Dyson V11"})
-        self.check({"1": "Altes", "3": "Nintendo <Switch>"})
+        self.check({"1": "Altes", "3": "Nintendo <Switch>"})  # Dyson снят
+        views = {"1": 50, "3": 7}
+        self.bot.fetcher.get_views = lambda ad_id, stop=None: views.get(ad_id)
         self.bot.screen_monitor("1")
-        self.assertIn("📥 Выгрузить все объявления (2)", str(self.tg.buttons))
-        self.bot.handle_callback("1", "w:export", 7)
+        self.assertIn("📥 Таблица всех объявлений (3)", str(self.tg.buttons))
+        self.bot._send_report(["1"], auto=True)                # авто-отчёт: база для Δ
         name, html, caption = self.tg.files[-1]
         self.assertTrue(name.endswith(".html"))
-        self.assertIn("активных: 1", caption)
-        self.assertIn("без новых объявлений: 1", caption)
+        self.assertIn("объявлений за всё время: 3", caption)
+        self.assertIn("🔥 1 · 💤 1", caption)
         self.assertIn('href="https://www.kleinanzeigen.de/s-anzeige/x/2"', html)
         self.assertIn("Nintendo &lt;Switch&gt;", html)            # экранировано
-        self.assertLess(html.index("Nintendo"), html.index("Dyson"), "новые сверху")
-        self.assertNotIn(">Altes<", html)
-        quiet = html[html.index('id="quiet"'):]
-        self.assertIn("Quiet", quiet)
-        self.assertIn("📝 Петя", html)
+        self.assertIn(">Altes<", html)
+        self.assertIn("снято", html)
+        self.assertLess(html.index("Nintendo"), html.index("Dyson"))
+        self.assertLess(html.index("Dyson"), html.index(">Altes<"), "новые сверху (по ID в пределах дня)")
+        self.assertIn("<td class=r>50</td>", html)
+        self.assertIn("Петя", html)
+        self.assertEqual(self.bot.state["watch"]["5"]["ads"]["1"]["views_rep"], 50)
+        self.assertFalse(self.bot.report_due(), "следующий — через report_hours")
+        views["1"] = 80                                        # через 5 часов
+        self.bot._send_report(["1"], auto=False)               # ручная выгрузка базу не сдвигает
+        html = self.tg.files[-1][1]
+        self.assertIn("<td class=r>80</td><td class=r><b class=\"up\">+30</b>", html)
+        self.bot._send_report(["1"], auto=True)
+        self.bot._send_report(["1"], auto=False)
+        self.assertIn("<td class=r>80</td><td class=r>0</td>", self.tg.files[-1][1])
+
+    def test_post_date_from_profile_list(self):
+        now = time.mktime((2026, 11, 14, 18, 0, 0, 0, 0, -1))
+        self.assertEqual(kb.posted_ts("Heute, 14:05", now),
+                         (time.mktime((2026, 11, 14, 14, 5, 0, 0, 0, -1)), True))
+        self.assertEqual(kb.posted_ts("Gestern, 09:12", now),
+                         (time.mktime((2026, 11, 13, 9, 12, 0, 0, 0, -1)), True))
+        self.assertEqual(kb.posted_ts("10.11.2026", now), (time.mktime((2026, 11, 10, 0, 0, 0, 0, 0, -1)), False))
+        self.assertEqual(kb.posted_ts("", now), (None, False))
+        raw = (SAMPLES / "profile_26402834.html").read_text(encoding="utf-8")
+        ads = kb.parse_profile_html(raw, 26402834).listings
+        self.assertTrue(ads and all(kb.posted_ts(a["posted"])[0] for a in ads.values()), "дата у каждого")
+        w = {}
+        self.bot._remember_ads(w, {"7": {"title": "A", "posted": "Heute, 14:05"}}, now)
+        self.bot._remember_ads(w, {"7": {"title": "A", "posted": "14.11.2026"}}, now + 86400)
+        self.assertTrue(w["ads"]["7"]["posted_time"], "точное время не затирается датой")
+
+    def test_old_state_gets_ads_registry(self):
+        st = {"watch": {"5": {"name": "W", "seen": ["1", "2"], "titles": {"2": "Lampe"},
+                              "new_ads": [{"id": "2", "title": "Lampe", "url": "u2", "at": 100}]}}}
+        (Path(self.tmp.name) / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        reg = self.bot._load_state()["watch"]["5"]["ads"]
+        self.assertEqual(reg["2"]["title"], "Lampe")
+        self.assertEqual(reg["2"]["first"], 100)
+
+    def test_report_hours_button(self):
+        self.bot.handle_callback("1", "w:rep", 7)
+        self.assertEqual(self.bot.cfg["report_hours"], 8)
+        self.assertIn("Авто-таблица: каждые 8 ч", str(self.tg.buttons))
+        for _ in range(3):
+            self.bot.handle_callback("1", "w:rep", 7)
+        self.assertEqual(self.bot.cfg["report_hours"], 0)
+        self.assertFalse(self.bot.report_due())
 
     def test_old_state_without_titles_does_not_spam(self):
         w = self.bot.state["watch"]["5"]

@@ -40,7 +40,7 @@ import unicodedata
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -86,6 +86,7 @@ DEFAULT_CONFIG: dict = {
     "monitor_every_check": False,    # True — сообщение о КАЖДОЙ проверке (с заметкой), даже без новых
     "monitor_minutes_min": 10,
     "monitor_minutes_max": 30,
+    "report_hours": 5,               # таблица всех объявлений с просмотрами — сама раз в N часов (0 = выкл)
     # --- Прочее ---
     "tesseract_cmd": "",             # пусто = автоопределение
     "data_dir": "data",
@@ -288,22 +289,38 @@ def extract_listings(soup: BeautifulSoup) -> dict[str, dict]:
             href = a["href"] if a else ""
         title_el = el.select_one("h2, h3, .ellipsis, a.ellipsis")
         price_el = el.select_one("[class*='price']")
+        date_el = el.select_one(".aditem-main--top--right")
         ads[ad_id] = {
             "title": _clean_text(title_el.get_text(" ", strip=True)) if title_el else "",
             "url": (SITE + href) if href.startswith("/") else (href or f"{SITE}/s-anzeige/{ad_id}"),
             "price": _clean_text(price_el.get_text(" ", strip=True)) if price_el else "",
+            "posted": _clean_text(date_el.get_text(" ", strip=True)) if date_el else "",
         }
     for a in soup.find_all("a", href=True):
         m = AD_ID_RE.search(a["href"])
         if not m:
             continue
-        ad = ads.setdefault(m.group(1), {"title": "", "url": "", "price": ""})
+        ad = ads.setdefault(m.group(1), {"title": "", "url": "", "price": "", "posted": ""})
         if not ad["url"]:
             href = a["href"]
             ad["url"] = SITE + href if href.startswith("/") else href
         if not ad["title"]:
             ad["title"] = _clean_text(a.get_text(" ", strip=True))
     return ads
+
+
+def posted_ts(text: Optional[str], now: Optional[float] = None) -> tuple[Optional[float], bool]:
+    """Дата публикации из списка объявлений: «10.11.2026», «Heute, 14:05», «Gestern, 09:12».
+    Возвращает (время unix, известно ли время суток)."""
+    t = (text or "").strip()
+    m = re.search(r"(heute|gestern)\s*,?\s*(\d{1,2}):(\d{2})", t, re.I)
+    if m:
+        d = datetime.fromtimestamp(now or time.time()).date()
+        if m.group(1).lower() == "gestern":
+            d -= timedelta(days=1)
+        return datetime(d.year, d.month, d.day, int(m.group(2)), int(m.group(3))).timestamp(), True
+    d = parse_date(t)
+    return (datetime(d.year, d.month, d.day).timestamp(), False) if d else (None, False)
 
 
 BADGE_ATTR_CATEGORY = {"rating": "satisfaction", "friendliness": "friendliness", "reliability": "reliability"}
@@ -638,6 +655,37 @@ class Fetcher:
                 time.sleep(backoff)
         self._fail(ERROR_RU.get(last.error, last.error or "неизвестно"), lane)
         return last
+
+    def get_views(self, ad_id: str, stop: Optional[threading.Event] = None, retries: int = 2) -> Optional[int]:
+        """Число просмотров объявления (как «👁 803» на сайте). None — не удалось/объявление снято."""
+        url = VIEWS_URL.format(ad_id=ad_id)
+        for attempt in range(retries + 1):
+            lane = self._acquire(stop)
+            if lane is None:
+                return None
+            t0 = time.monotonic()
+            try:
+                resp = self._session(lane).get(url, timeout=self.cfg["request_timeout"],
+                                               headers={"Accept": "application/json"})
+                with self._lock:
+                    self.stats["requests"] += 1
+                    lane.requests += 1
+                    self._done.append(time.monotonic())
+                if resp.status_code == 200:
+                    self._on_success(lane, time.monotonic() - t0)
+                    n = resp.json().get("numVisits")
+                    return int(n) if n is not None else None
+                if resp.status_code in (404, 410):
+                    return None
+                if resp.status_code in (403, 429):
+                    self._on_blocked(lane)
+            except Exception:   # сеть/прокси/кривой JSON — попробуем ещё раз
+                pass
+            time.sleep(min(10.0, 1.5 * (2 ** attempt)))
+        return None
+
+
+VIEWS_URL = SITE + "/s-vac-get.json?adId={ad_id}"   # только читает счётчик (s-vac-inc-get — накручивает)
 
 
 ERROR_RU = {   # понятные названия частых ошибок
@@ -1549,6 +1597,15 @@ class Bot:
             st.setdefault(key, default)
         for old in ("pending", "job", "queue", "history"):   # данные прошлых версий не храним
             st.pop(old, None)
+        for w in st["watch"].values():              # реестр всех объявлений (раньше хранились только новые)
+            if "ads" not in w:
+                reg = w["ads"] = {}
+                for ad in w.get("new_ads") or []:
+                    reg[str(ad.get("id"))] = {"title": ad.get("title", ""), "price": ad.get("price", ""),
+                                              "url": ad.get("url", ""), "first": ad.get("at", 0)}
+                for ad_id, title in (w.get("titles") or {}).items():
+                    reg.setdefault(ad_id, {"title": title, "price": "", "url": f"{SITE}/s-anzeige/{ad_id}",
+                                           "first": w.get("added") or w.get("last") or 0})
         for rec in st["searched"]:                 # поиск, шедший при выключении бота, не доделан
             if rec.get("status") == "running":
                 rec["status"] = "interrupted"
@@ -2240,8 +2297,11 @@ class Bot:
             prof = res.profile
             w["fails"] = 0
             w["name"] = w.get("name") or prof.name or ""
+            if prof.aktiv_seit and not w.get("aktiv_seit"):
+                w["aktiv_seit"] = fmt_date(prof.aktiv_seit)
             label = self.watch_label(key, w)
             current = prof.listings
+            self._remember_ads(w, current, now)
             titles = w.setdefault("titles", {})          # ID объявления -> название (видели последним)
             if w["seen"] is None:
                 w["seen"] = sorted(current)
@@ -2281,6 +2341,33 @@ class Bot:
             lo, hi = self.cfg["monitor_minutes_min"], self.cfg["monitor_minutes_max"]
             w["next"] = now + random.uniform(lo, hi) * 60
         return out
+
+    MAX_ADS_PER_ACCOUNT = 2000
+
+    @staticmethod
+    def _remember_ads(w: dict, current: dict, now: float) -> None:
+        """Реестр ВСЕХ объявлений аккаунта, которые бот когда-либо видел (и те, что были до мониторинга).
+        Снятое с сайта остаётся в реестре с отметкой «gone»."""
+        reg = w.setdefault("ads", {})
+        for ad_id, ad in current.items():
+            r = reg.get(ad_id)
+            if r is None:
+                r = reg[ad_id] = {"first": now}
+            for f in ("title", "price", "url"):
+                if ad.get(f):
+                    r[f] = ad[f]
+            r["last"] = now
+            r.pop("gone", None)
+            ts, has_time = posted_ts(ad.get("posted"), now)
+            if ts and not (r.get("posted_time") and not has_time):   # «Heute, 14:05» не затираем «14.11.2026»
+                r["posted"], r["posted_time"] = ts, has_time
+        for ad_id, r in reg.items():
+            if ad_id not in current and not r.get("gone"):
+                r["gone"] = now
+        if len(reg) > Bot.MAX_ADS_PER_ACCOUNT:          # самые старые снятые — выкидываем
+            old = sorted((k for k in reg if reg[k].get("gone")), key=lambda k: reg[k]["gone"])
+            for k in old[:len(reg) - Bot.MAX_ADS_PER_ACCOUNT]:
+                del reg[k]
 
     def new_ads_text(self, keys: list[str]) -> str:
         """Список всех новых объявлений, замеченных после того, как аккаунт встал в мониторинг."""
@@ -2333,96 +2420,179 @@ class Bot:
         lines.append("\nНажми на аккаунт — откроется его карточка (там «📜 Новые» — все его объявления).")
         return "\n".join(lines), chunked(buttons, 3)
 
+    def refresh_views(self) -> int:
+        """Обновляет просмотры у всех объявлений, которые сейчас висят на сайте. Возвращает, у скольких получилось."""
+        getter = getattr(self.fetcher, "get_views", None)
+        if getter is None:
+            return 0
+        with self.lock:
+            todo = [(key, ad_id) for key, w in self.state["watch"].items()
+                    for ad_id, r in (w.get("ads") or {}).items() if not r.get("gone")]
+        ok = 0
+        for (key, ad_id), n in zip(todo, self.pool.map(lambda t: getter(t[1]), todo)):
+            if n is None:
+                continue
+            with self.lock:
+                r = ((self.state["watch"].get(key) or {}).get("ads") or {}).get(ad_id)
+                if r is not None:
+                    r["views"], r["views_at"] = n, time.time()
+                    ok += 1
+        return ok
+
+    @staticmethod
+    def _ad_time(r: dict) -> float:
+        return r.get("posted") or r.get("first") or 0
+
     def export_ads_html(self) -> tuple[str, str]:
-        """Выгрузка мониторинга одним файлом: все объявления, замеченные за время слежки (новые сверху,
-        ссылки кликабельные), и кто из аккаунтов активен, а кто нет. Возвращает (html, короткая сводка)."""
+        """Одна таблица — ВСЕ объявления, которые бот видел за всё время, новые сверху: дата публикации,
+        аккаунт, объявление, цена, просмотры и их прирост с прошлого отчёта. Ниже — сводка по аккаунтам."""
         esc = html_lib.escape
         now = time.time()
-        watch = dict(self.state["watch"])
-        rows, active, quiet = [], [], []
-        for key, w in watch.items():
-            ads = w.get("new_ads") or []
-            for ad in ads:
-                rows.append((ad.get("at", 0), key, w, ad))
-            (active if ads else quiet).append((key, w))
-        rows.sort(key=lambda r: r[0], reverse=True)
-        active.sort(key=lambda kw: max(a.get("at", 0) for a in kw[1]["new_ads"]), reverse=True)
+        last_rep = self.state.get("report_last") or 0
+        watch = {k: w for k, w in list(self.state["watch"].items())}
+
+        def when(ts: float, has_time: bool = False) -> str:
+            if not ts:
+                return "—"
+            return time.strftime("%d.%m.%y %H:%M" if has_time else "%d.%m.%y", time.localtime(ts))
+
+        def delta(r: dict) -> str:
+            v = r.get("views")
+            if v is None:
+                return ""
+            base = r.get("views_rep")
+            if base is None:
+                base = 0 if (r.get("first", 0) > last_rep and last_rep) else None   # новое с прошлого отчёта
+            if base is None:
+                return ""
+            d = v - base
+            return f'<b class="up">+{d}</b>' if d > 0 else ("0" if d == 0 else str(d))
 
         def acc(key: str, w: dict) -> str:
-            name = esc(w.get("name") or f"ID {key}")
-            note = f'<div class="note">📝 {esc(w["note"])}</div>' if w.get("note") else ""
-            return f'<a href="{esc(PROFILE_URL.format(uid=key))}">{name}</a>{note}'
+            return (f'<a href="{esc(PROFILE_URL.format(uid=key))}">{esc(w.get("name") or "ID " + key)}</a>'
+                    + (f'<small>{esc(w["note"])}</small>' if w.get("note") else ""))
 
-        def tm(ts: float, fmt: str = "%d.%m %H:%M") -> str:
-            return time.strftime(fmt, time.localtime(ts)) if ts else "—"
+        items = [(key, w, ad_id, r) for key, w in watch.items() for ad_id, r in (w.get("ads") or {}).items()]
+        items.sort(key=lambda t: (time.strftime("%Y%m%d", time.localtime(self._ad_time(t[3]))),
+                                  int(t[2]) if t[2].isdigit() else 0), reverse=True)
+        rows = []
+        for key, w, ad_id, r in items:
+            title = esc(r.get("title") or "без названия")
+            link = f'<a href="{esc(r["url"])}">{title}</a>' if r.get("url") else title
+            gone = r.get("gone")
+            views = r.get("views")
+            rows.append(f'<tr{" class=gone" if gone else ""}>'
+                        f'<td class=n>{when(self._ad_time(r), r.get("posted_time", False))}</td>'
+                        f'<td>{acc(key, w)}</td>'
+                        f'<td>{link}' + (f'<small>снято {when(gone)}</small>' if gone else "") + '</td>'
+                        f'<td class=n>{esc(r.get("price") or "")}</td>'
+                        f'<td class=r>{"" if views is None else views}</td>'
+                        f'<td class=r>{delta(r)}</td></tr>')
 
-        ad_rows = []
-        for i, (at, key, w, ad) in enumerate(rows, 1):
-            url = ad.get("url") or ""
-            title = esc(ad.get("title") or "без названия")
-            link = f'<a href="{esc(url)}">{title}</a>' if url else title
-            kind = f'✏️ замена<div class="note">было: {esc(ad["was"])}</div>' if ad.get("was") else "🆕 новое"
-            ad_rows.append(f"<tr><td>{i}</td><td>{tm(at)}</td><td>{acc(key, w)}</td><td>{link}</td>"
-                           f"<td>{esc(ad.get('price') or '')}</td><td>{kind}</td></tr>")
-        act_rows = []
-        for key, w in active:
-            ads = w["new_ads"]
-            n_repl = sum(1 for a in ads if a.get("was"))
-            last = max(ads, key=lambda a: a.get("at", 0))
-            act_rows.append(f"<tr><td>{acc(key, w)}</td><td>{esc(self.watch_added_str(w) or '—')}</td>"
-                            f"<td>{len(ads) - n_repl}" + (f" + {n_repl} замен" if n_repl else "") + "</td>"
-                            f"<td>{tm(last.get('at', 0))}</td></tr>")
-        quiet_rows = [f"<tr><td>{acc(key, w)}</td><td>{esc(self.watch_added_str(w) or '—')}</td>"
-                      f"<td>{len(w.get('seen') or [])}</td><td>{tm(w.get('last', 0))}</td></tr>" for key, w in quiet]
+        accounts = []
+        for key, w in watch.items():
+            reg = w.get("ads") or {}
+            live = [r for r in reg.values() if not r.get("gone")]
+            newest = max((self._ad_time(r) for r in reg.values()), default=0)
+            accounts.append((newest, key, w, len(live), len(reg), bool(w.get("new_ads"))))
+        accounts.sort(key=lambda a: a[0], reverse=True)
+        n_active = sum(1 for a in accounts if a[5])
+        acc_rows = [f"<tr><td>{'🔥' if act else '💤'}</td><td>{acc(key, w)}</td>"
+                    f"<td class=n>{esc(w.get('aktiv_seit') or '—')}</td>"
+                    f"<td class=n>{esc(self.watch_added_str(w, '%d.%m.%y') or '—')}</td>"
+                    f"<td class=r>{live}/{total}</td><td class=n>{when(newest)}</td></tr>"
+                    for newest, key, w, live, total, act in accounts]
 
-        def table(head: str, body: list[str], empty: str) -> str:
-            if not body:
-                return f'<p class="empty">{empty}</p>'
-            return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
-
-        summary = (f"Аккаунтов в мониторинге: {len(watch)} · 🔥 активных: {len(active)} · "
-                   f"💤 без новых объявлений: {len(quiet)} · объявлений замечено: {len(rows)}")
+        summary = (f"Аккаунтов: {len(watch)} · 🔥 {n_active} · 💤 {len(watch) - n_active} · "
+                   f"объявлений за всё время: {len(items)} (на сайте сейчас "
+                   f"{sum(1 for t in items if not t[3].get('gone'))})")
+        since = f"Δ — прирост просмотров с прошлого отчёта ({when(last_rep, True)})" if last_rep else \
+            "Δ появится со следующего отчёта"
         doc = f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Мониторинг {tm(now, '%d.%m.%Y %H:%M')}</title>
+<title>Объявления {when(now, True)}</title>
 <style>
-:root {{ color-scheme: light dark; --bg:#fff; --fg:#1b1b1b; --muted:#6b6b6b; --line:#e3e3e3; --head:#f4f4f4; --link:#0a58ca; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --bg:#16181c; --fg:#e8e8e8; --muted:#9a9a9a; --line:#2c2f36; --head:#1f2228; --link:#7ab4ff; }} }}
-body {{ margin:0; padding:16px; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui, sans-serif; }}
-h1 {{ font-size:20px; margin:0 0 4px; }} h2 {{ font-size:17px; margin:28px 0 8px; }}
-.sum {{ color:var(--muted); margin-bottom:8px; }} .note {{ color:var(--muted); font-size:13px; }}
+:root {{ color-scheme: light dark; --bg:#fff; --fg:#1d1d1f; --mute:#86868b; --line:#ececec; --head:#f6f6f7; --link:#0b5bd3; --up:#1a7f37; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#141518; --fg:#e6e6e6; --mute:#8b8d93; --line:#26282d; --head:#1c1e22; --link:#79b0ff; --up:#4ac26b; }} }}
+body {{ margin:0; padding:12px 16px; background:var(--bg); color:var(--fg); font:13px/1.35 system-ui, sans-serif; }}
+h1 {{ font-size:16px; margin:0 0 2px; }} h2 {{ font-size:14px; margin:22px 0 6px; }}
+.sum, small, .gone td {{ color:var(--mute); }} small {{ display:block; font-size:11px; }}
+input {{ width:100%; max-width:320px; box-sizing:border-box; margin:8px 0; padding:6px 8px; font:inherit;
+        border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }}
 .wrap {{ overflow-x:auto; }} table {{ border-collapse:collapse; width:100%; }}
-th, td {{ border-bottom:1px solid var(--line); padding:8px 6px; text-align:left; vertical-align:top; }}
-th {{ background:var(--head); position:sticky; top:0; }} a {{ color:var(--link); }}
-nav a {{ margin-right:14px; }} .empty {{ color:var(--muted); }}
+th, td {{ border-bottom:1px solid var(--line); padding:5px 6px; text-align:left; vertical-align:top; }}
+th {{ background:var(--head); position:sticky; top:0; font-weight:600; white-space:nowrap; }}
+.n {{ white-space:nowrap; }} .r {{ text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }}
+a {{ color:var(--link); text-decoration:none; }} .gone a {{ color:var(--mute); }} .up {{ color:var(--up); }}
 </style></head><body>
-<h1>👁 Мониторинг — выгрузка {tm(now, '%d.%m.%Y %H:%M')}</h1>
-<div class="sum">{esc(summary)}</div>
-<nav><a href="#ads">📜 Все объявления</a><a href="#active">🔥 Активные</a><a href="#quiet">💤 Неактивные</a></nav>
-<h2 id="ads">📜 Все объявления, замеченные за время мониторинга ({len(rows)}) — новые сверху</h2>
-<div class="wrap">{table("<th>#</th><th>Когда</th><th>Аккаунт</th><th>Объявление</th><th>Цена</th><th>Тип</th>",
-                        ad_rows, "Пока ни одного нового объявления.")}</div>
-<h2 id="active">🔥 Активные — заливали товар после добавления ({len(active)})</h2>
-<div class="wrap">{table("<th>Аккаунт</th><th>В мониторинге с</th><th>Новых</th><th>Последнее</th>",
-                        act_rows, "Активных пока нет.")}</div>
-<h2 id="quiet">💤 Неактивные — ничего нового с момента добавления ({len(quiet)})</h2>
-<div class="wrap">{table("<th>Аккаунт</th><th>В мониторинге с</th><th>Объявл. на странице</th><th>Посл. проверка</th>",
-                        quiet_rows, "Неактивных нет.")}</div>
+<h1>Объявления — {when(now, True)}</h1>
+<div class="sum">{esc(summary)} · {esc(since)}</div>
+<input id="q" type="search" placeholder="Фильтр: аккаунт, заметка, товар…">
+<div class="wrap"><table id="ads"><thead><tr><th>Дата</th><th>Аккаунт</th><th>Объявление</th><th>Цена</th>
+<th class=r>👁</th><th class=r>Δ</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan=6>Пока пусто</td></tr>'}</tbody></table></div>
+<h2>Аккаунты</h2>
+<div class="wrap"><table><thead><tr><th></th><th>Аккаунт</th><th>Рег.</th><th>В мониторинге</th>
+<th class=r>Сейчас/всего</th><th>Последнее</th></tr></thead><tbody>{''.join(acc_rows)}</tbody></table></div>
+<script>
+document.getElementById("q").addEventListener("input", e => {{
+  const q = e.target.value.toLowerCase();
+  for (const tr of document.querySelectorAll("#ads tbody tr"))
+    tr.style.display = tr.textContent.toLowerCase().includes(q) ? "" : "none";
+}});
+</script>
 </body></html>"""
         return doc, summary
+
+    def _send_report(self, chat_ids: list[str], auto: bool) -> None:
+        """Собирает просмотры и присылает полную таблицу. Авто-отчёт сдвигает базу для столбца Δ."""
+        busy = getattr(self, "_report_lock", None)
+        if busy is None:
+            busy = self._report_lock = threading.Lock()
+        if not busy.acquire(blocking=False):
+            for chat_id in chat_ids:
+                self.tg.send(chat_id, "⏳ Таблица уже собирается — пришлю, как будет готова.")
+            return
+        try:
+            self.refresh_views()
+            with self.lock:
+                doc, summary = self.export_ads_html()
+            name = time.strftime("ads_%Y-%m-%d_%H-%M.html")
+            head = "📊 Отчёт по объявлениям (авто)" if auto else "📥 Выгрузка объявлений"
+            for chat_id in chat_ids:
+                if not self.tg.send_document(chat_id, name, doc.encode("utf-8"), caption=f"{head}\n{summary}"):
+                    self.tg.send(chat_id, "⚠️ Не получилось отправить файл, присылаю текстом.\n\n"
+                                 + self.new_ads_text(list(self.state["watch"])))
+            if auto:
+                with self.lock:
+                    now = time.time()
+                    for w in self.state["watch"].values():
+                        for r in (w.get("ads") or {}).values():
+                            if r.get("views") is not None:
+                                r["views_rep"] = r["views"]
+                    self.state["report_last"] = now
+                    self.state["report_next"] = now + float(self.cfg["report_hours"]) * 3600
+                    self.save()
+        except Exception:
+            log.exception("Ошибка отчёта по объявлениям")
+        finally:
+            busy.release()
 
     def send_export(self, chat_id: str) -> None:
         if not self.state["watch"]:
             self.tg.send(chat_id, "В мониторинге никого нет — выгружать нечего.")
             return
-        doc, summary = self.export_ads_html()
-        name = time.strftime("monitoring_%Y-%m-%d_%H-%M.html")
-        ok = self.tg.send_document(chat_id, name, doc.encode("utf-8"),
-                                   caption=f"📥 Выгрузка мониторинга\n{summary}\n\nОткрой файл — там все объявления "
-                                           f"списком (новые сверху) с кликабельными ссылками, активные и неактивные.")
-        if not ok:
-            self.tg.send(chat_id, "⚠️ Не получилось отправить файл, присылаю текстом.\n\n"
-                         + self.new_ads_text(list(self.state["watch"])))
+        n = sum(1 for w in self.state["watch"].values() for r in (w.get("ads") or {}).values() if not r.get("gone"))
+        self.tg.send(chat_id, f"⏳ Собираю просмотры по {n} объявлениям и делаю таблицу…")
+        threading.Thread(target=self._send_report, args=([chat_id], False), daemon=True).start()
+
+    def report_due(self) -> bool:
+        hours = float(self.cfg.get("report_hours") or 0)
+        if hours <= 0 or not self.state["watch"]:
+            return False
+        nxt = self.state.get("report_next")
+        if nxt is None:                       # первый раз — через 10 минут, чтобы записать базу просмотров
+            self.state["report_next"] = nxt = time.time() + 600
+        return time.time() >= nxt
 
     def monitor_loop(self) -> None:
         while True:
@@ -2436,6 +2606,8 @@ nav a {{ margin-right:14px; }} .empty {{ color:var(--muted); }}
                         new_ad = text.startswith(("🆕", "✏️"))
                         self.broadcast(text, [[btn(f"📜 Все новые у этого аккаунта ({n})", f"w:ads:{key}")]]
                                        if new_ad else None)
+                if self.report_due():
+                    self._send_report(list(self.cfg["allowed_chat_ids"]), auto=True)
             except Exception:
                 log.exception("Ошибка мониторинга")
             self.monitor_wakeup.wait(15)
@@ -2465,8 +2637,8 @@ nav a {{ margin-right:14px; }} .empty {{ color:var(--muted); }}
         rows = [[btn("➕ Добавить", "w:new")] + ([btn(f"🔄 Проверить всех ({len(keys)})", "w:all")] if w else [])]
         if w:
             n_active = len(self.active_watch_keys())
-            n_ads = sum(len(x.get("new_ads") or []) for x in w.values())
-            rows.append([btn(f"📥 Выгрузить все объявления ({n_ads})", "w:export")])
+            n_ads = sum(len(x.get("ads") or {}) for x in w.values())
+            rows.append([btn(f"📥 Таблица всех объявлений ({n_ads})", "w:export")])
             rows.append([btn("📜 Новые текстом", "w:ads:*"), btn(f"🔥 Активные ({n_active})", "w:active")])
         start = page * self.MONITOR_PAGE
         acc_buttons = []
@@ -2494,6 +2666,8 @@ nav a {{ margin-right:14px; }} .empty {{ color:var(--muted); }}
         every = self.cfg.get("monitor_every_check")
         rows.append([btn(f"⏱ Интервал: {lo}–{hi} мин", "w:int"),
                      btn("🔔 О каждой проверке: " + ("вкл" if every else "выкл"), "w:every")])
+        rh = int(self.cfg.get("report_hours") or 0)
+        rows.append([btn("📊 Авто-таблица: " + (f"каждые {rh} ч" if rh else "выкл"), "w:rep")])
         self.show(chat_id, "\n".join(lines), rows, msg_id)
 
     def screen_watch_card(self, chat_id: str, key: str, msg_id: Optional[int] = None, note: str = "") -> None:
@@ -2879,6 +3053,14 @@ nav a {{ margin-right:14px; }} .empty {{ color:var(--muted); }}
                 return
             if act == "every":
                 self.save_config(monitor_every_check=not self.cfg.get("monitor_every_check"))
+            if act == "rep":                       # 5 → 8 → 12 → 24 → выкл → 3 → 5
+                cycle = [3, 5, 8, 12, 24, 0]
+                cur = int(self.cfg.get("report_hours") or 0)
+                nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else 5
+                self.save_config(report_hours=nxt)
+                last = self.state.get("report_last") or time.time()
+                self.state["report_next"] = last + nxt * 3600 if nxt else None
+                act = "every"                      # просто перерисовать экран
             if act == "card":
                 u["step"] = None
                 self.screen_watch_card(chat_id, parts[2], msg_id)
